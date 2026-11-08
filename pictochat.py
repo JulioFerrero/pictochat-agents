@@ -47,6 +47,7 @@ MP_PREFIX = b"\x03\x09\xbf"
 MP_CMD = bytes.fromhex("0309bf000000")    # host -> clients (poll / data)
 MP_REPLY = bytes.fromhex("0309bf000010")  # client -> host
 MP_ACK = bytes.fromhex("0309bf000003")    # host -> clients (ack)
+MP_OUTSTANDING = 100                       # offload: packets queued on the ESP32 at most (it holds 128)
 BROADCAST = b"\xff" * 6
 # Nintendo OUIs seen on DS / Wii / USB Connector hardware (00:1b:7a was the DS Lite in room_a)
 NINTENDO_OUIS = {bytes.fromhex(x) for x in ("0009bf", "001656", "0017ab", "00191d", "001ae9", "001b7a", "001bea", "001cbe", "001df0", "001e35", "001f32", "001fc5", "002147", "0022aa", "0022d7", "002331", "0023cc", "002444", "0024f3", "00253f", "0025a0", "002709", "40d28a", "e84ece", "a4c0e1", "7cbb8a", "9cbacf", "d86bf7")}
@@ -1039,7 +1040,11 @@ class SerialSock:
     To the modem: 'C' channel, mac[6], rate, all; 'T' 802.11 frame without FCS; 'P' ping.
     From the modem: 'R' rssi i8, rate u8 (wifi_phy_rate_t), u32 timestamp, frame; 'S' status text; 'E' TX error.
     send() takes `tx_radiotap + frame` like a monitor socket; recvfrom() returns `radiotap + frame`. Own frames are
-    looped back (as a monitor socket does) so they still land in the pcap."""
+    looped back (as a monitor socket does) so they still land in the pcap.
+
+    Multiplay offload (firmware that reports `mp=1`): the modem runs the poll / reply / ACK cycle itself. The host
+    pushes packets with mp_push(), keeps the modem's client list current with mp_clients() and gets 'M' reports
+    (queue length, poll and reply counters) in self.mpstats."""
     RATE_500K = {0: 2, 1: 4, 2: 11, 3: 22, 5: 4, 6: 11, 7: 22, 8: 96, 9: 48, 10: 24, 11: 12, 12: 108, 13: 72,
                  14: 36, 15: 18}
     PHY_2M_LONG = 1
@@ -1054,6 +1059,10 @@ class SerialSock:
         self.pending = []
         self.tx_errors = 0
         self.want_poll = False
+        self.mp = False               # firmware supports the multiplay offload
+        self.mpstats = None
+        self.epoch = 0
+        self.pushed = 0               # packets pushed since the last mp_clear (mod 65536)
         self.ser.reset_input_buffer()
         self._write(b"C", bytes([channel]) + bytes(host_mac) + bytes([self.PHY_2M_LONG, 1 if forward_all else 0]))
         deadline = time.time() + 5
@@ -1123,13 +1132,45 @@ class SerialSock:
             text = p.decode("ascii", "replace")
             if text.startswith("ready"):
                 self.ready = True
+                self.mp = " mp=1" in text
             self.emit("# esp32: " + text)
+        elif kind == ord("M") and len(p) >= 25:
+            epoch, qlen, queued, polls, replies, acks, done, txerr = struct.unpack_from("<BHHIIIII", p, 0)
+            self.mpstats = dict(epoch=epoch, qlen=qlen, queued=queued, polls=polls, replies=replies, acks=acks,
+                                done=done, txerr=txerr)
         elif kind == ord("E") and len(p) >= 6:
             self.tx_errors += 1
             if self.tx_errors <= 5 or self.tx_errors % 1000 == 0:
                 err, fc = struct.unpack_from("<iH", p, 0)
                 self.emit("# esp32: TX error %d (0x%x) for frame control %04x, %d errors so far"
                           % (err, err, fc, self.tx_errors))
+
+    # ---- multiplay offload ----
+    def mp_config(self, on, clienttime, cmd_word, cmdcount, period_us, reply_wait_us, cycle):
+        self._write(b"m", struct.pack("<BHHHIIB", 1 if on else 0, clienttime, cmd_word, cmdcount,
+                                      int(period_us), int(reply_wait_us), cycle))
+
+    def mp_clients(self, aids, reopen=False):
+        """aids: {mac bytes: aid}. reopen: start again with the opening empty poll (re-association)."""
+        items = sorted(aids.items(), key=lambda kv: kv[1])
+        self._write(b"A", bytes([len(items)]) + b"".join(bytes([a]) + bytes(m) for m, a in items) +
+                    bytes([1 if reopen else 0]))
+
+    def mp_push(self, port, payload, min_sent, max_sent):
+        self._write(b"Q", bytes([port, max(0, min(255, min_sent)), max(1, min(255, max_sent))]) + bytes(payload))
+        self.pushed = (self.pushed + 1) & 0xFFFF
+
+    def mp_clear(self):
+        self.epoch = (self.epoch + 1) & 0xFF
+        self.pushed = 0
+        self._write(b"X", bytes([self.epoch]))
+
+    def mp_outstanding(self):
+        """Packets pushed that the modem has not finished yet (queued there or still on the way over USB)."""
+        m = self.mpstats
+        if not m or m["epoch"] != self.epoch:
+            return self.pushed
+        return m["qlen"] + ((self.pushed - m["queued"]) & 0xFFFF)
 
     def recvfrom(self, n):
         if not self.pending:
@@ -1311,8 +1352,17 @@ def host(args):
         if bridge:
             bridge.send({"kind": "log", "t": time.time() - t0, "text": msg})
 
+    offload = False
     if isinstance(sock, SerialSock):
         sock.emit = emit
+        offload = sock.mp and args.offload and not args.no_poll
+        if offload:
+            sock.mp_config(True, args.clienttime, args.cmd_word, args.cmdcount, args.mp_period_ms * 1000,
+                           args.reply_wait * 1000, args.poll_cycle)
+        elif sock.mp:
+            sock.mp_config(False, args.clienttime, args.cmd_word, args.cmdcount, 0, 0, 1)
+        emit("# polling: %s" % ("on the ESP32 every %.1f ms (multiplay offload)" % args.mp_period_ms if offload
+                                 else "from this program every %.1f ms" % args.poll_ms))
 
     def gui(kind, **kw):
         if bridge:
@@ -1362,6 +1412,12 @@ def host(args):
                 emit("---- MARKER: " + markers.pop(0))
             while not cmdq.empty():
                 handle_gui_cmd(cmdq.get(), args, ml, src, emit, gui)
+            # offload: hand queued packets to the ESP32, which repeats each one on its polls until confirmed
+            while offload and ml.queue and sock.mp_outstanding() < MP_OUTSTANDING:
+                port_, pl_, reps_, _ann, min_sent_ = ml.queue.pop(0)[:5]
+                sock.mp_push(port_, pl_, min_sent_ if args.confirm else reps_, reps_)
+                gui("tx", port=port_, ptype=struct.unpack_from("<H", pl_, 0)[0] if len(pl_) >= 2 else -1,
+                    hex=pl_.hex(), repeats=0)
             if now >= next_t:
                 try:
                     sock.send(tx_radiotap(2) + build_beacon(src, args.channel, st, st.tsf))
@@ -1374,7 +1430,7 @@ def host(args):
                 except OSError as e:
                     emit("# send error: %s" % e)
                     time.sleep(0.5)
-            if aids and not args.no_poll and next_poll is None:
+            if aids and not args.no_poll and not offload and next_poll is None:
                 next_poll = now
             if not aids:
                 next_poll = None
@@ -1445,6 +1501,9 @@ def host(args):
                     if ack_fail == 0 and cmd_carried and args.confirm:
                         ml.confirm()                            # every addressed client got that packet
                 ack_deadline = None
+            if offload and sock.mpstats:
+                mp["cmd"], mp["ack"] = sock.mpstats["polls"], sock.mpstats["acks"]
+                mp["reply"] = sock.mpstats["replies"]
             if now >= next_status:
                 emit("# status: %d beacons sent, counter=%d, interval=%dTU, stations heard: %s, frames logged: %d, "
                      "aids: %s, CMD sent %d, replies heard %d, ACK sent %d"
@@ -1479,7 +1538,8 @@ def host(args):
             if not (args.all or mine or from_nin or tr.relevant(f)):
                 continue
             if f.cls == "MP-REPLY":
-                mp["reply"] += 1
+                if not offload:
+                    mp["reply"] += 1
                 ent = wm_entry(f.body)
                 if ent and ent[1] and f.a2 and bytes(f.a2) in aids:
                     port, pl = ent
@@ -1506,6 +1566,10 @@ def host(args):
                     mac(f.a2), aids[bytes(f.a2)], f.body[:2].hex()))
                 ml.on_deauth(aids[bytes(f.a2)])
                 del aids[bytes(f.a2)]
+                if offload:
+                    if not aids:
+                        sock.mp_clear()
+                    sock.mp_clients(aids)
                 st.members = 1 + len(aids)
                 st.on_members_changed()
             if f.cls.startswith("MP-") or (f.ftype == 2 and f.a1 and bytes(f.a1)[:3] == MP_PREFIX):
@@ -1541,6 +1605,9 @@ def host(args):
                     emit("# assoc-req from %s -> AID %d" % (mac(m_), aid))
                     if m_ in aids:
                         ml.on_assoc(aids[m_], m_)
+                        if offload:
+                            sock.mp_clear()                     # on_assoc dropped the queue: drop the modem's too
+                            sock.mp_clients(aids, reopen=True)
                         st.members = 1 + len(aids)
                         st.status = 0xBD8A
                         st.on_members_changed()
@@ -1667,6 +1734,8 @@ def main():
     h.add_argument("--no-setup", action="store_true")
     h.add_argument("--out", default="host_log", help="log/pcap basename (default host_log)")
     h.add_argument("--all", action="store_true", help="log every frame heard, not just DS-related ones")
+    h.add_argument("--mp-period-ms", type=float, default=2.5, help="with --serial and the offload firmware: interval between polls on the ESP32 (real host: ~2.2 ms)")
+    h.add_argument("--offload", action="store_true", help="EXPERIMENTAL, with --serial and the offload firmware: run the poll loop on the ESP32 (first test: the DS did not answer and the flood of polls knocked a nearby Pi's Wi-Fi out)")
     h.add_argument("--poll-ms", type=float, default=5.0, help="interval between CMD polls once a DS is associated (real host: ~2.2 ms; 20 ms worked but made messages slow)")
     h.add_argument("--clienttime", type=lambda x: int(x, 0), default=0x3E6, help="CMD clienttime (reply window per client, us); 0xD0 + 4*max reply bytes")
     h.add_argument("--cmd-word", type=lambda x: int(x, 0), default=0, help="third CMD body word (meaning unknown)")
