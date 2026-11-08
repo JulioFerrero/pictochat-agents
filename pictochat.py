@@ -1138,6 +1138,10 @@ def handle_gui_cmd(c, args, ml, src, emit, gui):
             ml.put_message(pl)
             emit("# gui: queued host member message")
             gui("message", id=0, hex=pl.hex(), dir="tx")
+        elif cmd == "set_name":  # {"cmd":"set_name","name":"..."}: nickname for the joins that follow (max 10)
+            name = str(c["name"])[:10]
+            ml.name = args.name = name
+            emit("# gui: host nickname is now %r (shown to DSes that join from now on)" % name)
         elif cmd == "chat":     # {"cmd":"chat","pixels":[[...]*256]*80} palette indices
             msg = ml.send_chat(bitmap_to_image(c["pixels"]))
             gui("message", id=0, hex=msg.hex(), dir="tx")
