@@ -582,7 +582,10 @@ impl MultiplayHost {
                 return;
             }
             self.seen_e.insert(pl.to_vec(), now);
-            self.put(0xE, pl.to_vec(), None, 5); // rebroadcast verbatim
+            // rebroadcast verbatim; like the host's own messages, middle fragments move on once a poll carrying them
+            // was answered by everyone, the first and the last keep the full count (min 5 sends)
+            let edge = off == 0 || last != 0;
+            self.put(0xE, pl.to_vec(), None, if edge { 5 } else { 1 });
             let data = &pl[12..(12 + flen).min(pl.len())];
             if off == 0 {
                 self.asm.remove(&mid); // a new message from this sender starts
