@@ -25,7 +25,8 @@
  *              'S' status text
  *              'E' transmit error: esp_err_t i32 LE, frame control u16 LE
  *              'M' multiplay report: epoch u8, qlen u16, queued u16 (packets received since the last 'X'),
- *                  polls u32, replies u32, acks u32, done u32, txerr u32
+ *                  polls u32, replies u32, acks u32, done u32, txerr u32, answered u16 (bit per AID that replied
+ *                  since the previous report: lets the PC notice a DS that left without a deauth)
  */
 #include <string.h>
 #include <stdio.h>
@@ -105,6 +106,7 @@ static uint16_t cl_full;                    /* bit per associated AID */
 static volatile uint16_t mp_pending;        /* clients that have not answered the current poll yet */
 static volatile bool mp_first;              /* next poll is the opening empty one (after a new DS associated) */
 static volatile uint32_t mp_polls, mp_replies, mp_acks, mp_done, mp_txerr;
+static volatile uint16_t mp_answered;       /* AIDs that replied since the last 'M' report */
 static TaskHandle_t mp_task_h;
 static esp_timer_handle_t mp_timer;
 /* last non-empty reply payload per AID, to pass each DS packet to the PC once instead of on every poll */
@@ -171,6 +173,7 @@ static bool mp_reply(const uint8_t *f, int len)
     portEXIT_CRITICAL(&mp_mux);
     if (aid < 0) return true;                                            /* not one of ours: let the PC log it */
     mp_replies++;
+    mp_answered |= 1u << aid;
     if (mp_pending & (1u << aid)) {
         mp_pending &= ~(1u << aid);
         if (mp_task_h) xTaskNotify(mp_task_h, BIT_REPLY, eSetBits);
@@ -471,11 +474,13 @@ static void mp_handle(uint8_t type, const uint8_t *p, uint16_t len)
 
 static void mp_report(void)
 {
-    uint8_t r[25];
+    uint8_t r[27];
     portENTER_CRITICAL(&mp_mux);
     r[0] = mp_epoch;
     put16(r + 1, mpq_len);
     put16(r + 3, mpq_queued);
+    put16(r + 25, mp_answered);
+    mp_answered = 0;
     portEXIT_CRITICAL(&mp_mux);
     uint32_t v[5] = { mp_polls, mp_replies, mp_acks, mp_done, mp_txerr };
     memcpy(r + 5, v, sizeof v);                          /* little-endian RISC-V */

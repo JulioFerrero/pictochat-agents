@@ -170,6 +170,7 @@ pub struct MpStats {
     pub acks: u32,
     pub done: u32,
     pub txerr: u32,
+    pub answered: Option<u16>, // AIDs that replied since the previous report (newer firmware only)
 }
 
 impl MpStats {
@@ -187,6 +188,7 @@ impl MpStats {
             acks: u32at(13),
             done: u32at(17),
             txerr: u32at(21),
+            answered: if p.len() >= 27 { Some(u16::from_le_bytes([p[25], p[26]])) } else { None },
         })
     }
 }

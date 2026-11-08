@@ -28,6 +28,8 @@ pub enum Event {
 // message that has not started (packets already on the ESP32 cannot be reordered); 24 packets are at least
 // 24 polls (170 ms at 7 ms), several 50-ms 'M' reports, so the ESP32 does not run dry.
 const MP_OUTSTANDING: u32 = 24;
+// a DS that has not answered a single poll for this long is treated as gone (its deauth can get lost)
+const CLIENT_SILENT_S: f64 = 5.0;
 const USAGE: &str = "usage: pictochat-host [options]
   --serial TTY          ESP32-C3 modem with the offload firmware (default /dev/ttyACM0)
   --channel N           Wi-Fi channel (default 1)
@@ -157,6 +159,7 @@ struct Host {
     st: HostState,
     ml: MultiplayHost,
     aids: BTreeMap<Mac, u8>,
+    last_reply: HashMap<u8, f64>, // AID -> last time the ESP32 saw it answer a poll (from the 'M' reports)
     stations: BTreeMap<Mac, u32>,
     answered: HashSet<(Mac, &'static str, u16)>,
     rx_seen: HashMap<(u8, Vec<u8>), f64>,
@@ -385,9 +388,44 @@ impl Host {
             }
             b'M' => {
                 self.mp = MpStats::parse(&p).or(self.mp);
+                if let Some(mask) = self.mp.and_then(|m| m.answered) {
+                    let now = self.now();
+                    for aid in 1..16u8 {
+                        if mask & (1 << aid) != 0 && self.last_reply.contains_key(&aid) {
+                            self.last_reply.insert(aid, now);
+                        }
+                    }
+                    self.check_silent();
+                }
                 self.check_deliveries();
             }
             _ => {}
+        }
+    }
+
+    /// A DS left (deauth/disassoc) or went silent. The log line is the one pictochat_bot.py watches for.
+    fn remove_client(&mut self, mac: &Mac, reason: &str) {
+        let Some(aid) = self.aids.remove(mac) else { return };
+        self.last_reply.remove(&aid);
+        self.emit(&format!("# station {} deauthenticated (AID {} freed), {}", mac_str(mac), aid, reason));
+        self.ml.on_deauth(aid);
+        self.st.members = 1 + self.aids.len() as u8;
+        self.st.on_members_changed();
+        if self.aids.is_empty() {
+            self.clear_modem_queue();
+        }
+        self.sync_clients(false);
+    }
+
+    /// Drop DSes that stopped answering polls (needs the firmware's 'answered' field).
+    fn check_silent(&mut self) {
+        let now = self.now();
+        let gone: Vec<Mac> = self.aids.iter()
+            .filter(|(_, aid)| self.last_reply.get(aid).map_or(false, |t| now - t > CLIENT_SILENT_S))
+            .map(|(m, _)| *m)
+            .collect();
+        for m in gone {
+            self.remove_client(&m, &format!("reason timeout (no answer to any poll for {:.0} s)", CLIENT_SILENT_S));
         }
     }
 
@@ -437,18 +475,8 @@ impl Host {
             return;
         }
         if matches!(f.cls, "deauth" | "disassoc") {
-            if let Some(aid) = self.aids.remove(&a2) {
-                let reason = hex(&f.body[..f.body.len().min(2)]);
-                self.emit(&format!("# station {} deauthenticated (AID {} freed), reason {} ({})", mac_str(&a2), aid,
-                                   reason, f.cls));
-                self.ml.on_deauth(aid);
-                self.st.members = 1 + self.aids.len() as u8;
-                self.st.on_members_changed();
-                if self.aids.is_empty() {
-                    self.clear_modem_queue();
-                }
-                self.sync_clients(false);
-            }
+            let reason = format!("reason {} ({})", hex(&f.body[..f.body.len().min(2)]), f.cls);
+            self.remove_client(&a2, &reason);
         }
         if from_nin {
             let c = self.stations.entry(a2).or_insert(0);
@@ -475,6 +503,7 @@ impl Host {
                 aid = self.aids.get(&a2).copied().unwrap_or(1);
                 self.emit(&format!("# assoc-req from {} -> AID {}", mac_str(&a2), aid));
                 if self.aids.contains_key(&a2) {
+                    self.last_reply.insert(aid, self.now()); // the timeout starts at the association
                     self.ml.on_assoc(aid, a2);
                     self.flush_ml_logs();
                     self.clear_modem_queue(); // on_assoc dropped the queue: drop the modem's too
@@ -555,7 +584,7 @@ fn run() -> Result<(), String> {
     let ml = MultiplayHost::new(a.mac, &a.name, a.color, seed.rotate_left(17), a.hello_repeats);
     let freq = if a.channel == 14 { 2484 } else { 2407 + 5 * a.channel as u16 };
     let mut h = Host {
-        a, t0: Instant::now(), logf, pcap, gui, modem, st, ml, aids: BTreeMap::new(), stations: BTreeMap::new(),
+        a, t0: Instant::now(), logf, pcap, gui, modem, st, ml, aids: BTreeMap::new(), last_reply: HashMap::new(), stations: BTreeMap::new(),
         answered: HashSet::new(), rx_seen: HashMap::new(), ptype_seen: HashSet::new(), mp: None,
         deliveries: Vec::new(), tx_errors: 0,
         beacons: 0, logged: 0, freq,
