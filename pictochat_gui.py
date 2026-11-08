@@ -144,38 +144,52 @@ def pixels_to_ppm(rows, shade=False):
     return bytes(out)
 
 
-def text_to_pixels(text, color=1):
-    """Render text into the 80 x 256 picture with Pillow (None without Pillow). The DS shows picture columns ~22-252
-    and its name tab covers the top-left of the first 16-px line, so text goes on lines 2-5 (16 px each), x >= 26."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        return None
-    font = None
+TEXT_X0, TEXT_X1, TEXT_LINES = 26, 250, 4      # text area: lines 2-5 of the picture, inside the visible columns
+
+
+def _font():
+    from PIL import ImageFont
     for name in ("DejaVuSans.ttf", "FreeSans.ttf", "LiberationSans-Regular.ttf"):
         try:
-            font = ImageFont.truetype(name, 13)
-            break
+            return ImageFont.truetype(name, 13)
         except OSError:
             continue
-    if font is None:
-        font = ImageFont.load_default()
-    x0, x1 = 26, 250
-    img = Image.new("L", (PW, PH), 0)
-    d = ImageDraw.Draw(img)
+    return ImageFont.load_default()
+
+
+def wrap_text(text):
+    """Word-wrap text to the width of the visible picture area. Returns the list of lines (any number; one picture
+    holds TEXT_LINES of them). Needs Pillow (raises ImportError)."""
+    from PIL import Image, ImageDraw
+    font = _font()
+    d = ImageDraw.Draw(Image.new("L", (1, 1)))
     lines = []
     for para in text.split("\n"):
         cur = ""
         for word in para.split(" "):
             trial = (cur + " " + word).strip()
-            if d.textlength(trial, font=font) <= x1 - x0 or not cur:
+            if d.textlength(trial, font=font) <= TEXT_X1 - TEXT_X0 or not cur:
                 cur = trial
             else:
                 lines.append(cur)
                 cur = word
         lines.append(cur)
-    for i, ln in enumerate(lines[:4]):
-        d.text((x0, 17 + 16 * i), ln, fill=255, font=font)
+    return lines
+
+
+def text_to_pixels(text, color=1):
+    """Render text into the 80 x 256 picture with Pillow (None without Pillow). The DS shows picture columns ~22-252
+    and its name tab covers the top-left of the first 16-px line, so text goes on lines 2-5 (16 px each), x >= 26.
+    Text beyond 4 wrapped lines is cut off (see wrap_text to split it into several pictures)."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    font = _font()
+    img = Image.new("L", (PW, PH), 0)
+    d = ImageDraw.Draw(img)
+    for i, ln in enumerate(wrap_text(text)[:TEXT_LINES]):
+        d.text((TEXT_X0, 17 + 16 * i), ln, fill=255, font=font)
     px = img.load()
     return [[color if px[x, yy] > 110 else 0 for x in range(PW)] for yy in range(PH)]
 
