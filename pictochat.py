@@ -1031,6 +1031,114 @@ class BridgeSock:
         return self.pending.pop(0), None
 
 
+class SerialSock:
+    """Socket-like link to the ESP32-C3 radio modem (esp32c3_modem/, USB-C = /dev/ttyACM0), standing in for a
+    monitor-mode adapter. No root needed.
+
+    USB framing both ways: AA 55 | type | u16 len LE | payload | xor8 of type, len and payload (see modem.c).
+    To the modem: 'C' channel, mac[6], rate, all; 'T' 802.11 frame without FCS; 'P' ping.
+    From the modem: 'R' rssi i8, rate u8 (wifi_phy_rate_t), u32 timestamp, frame; 'S' status text; 'E' TX error.
+    send() takes `tx_radiotap + frame` like a monitor socket; recvfrom() returns `radiotap + frame`. Own frames are
+    looped back (as a monitor socket does) so they still land in the pcap."""
+    RATE_500K = {0: 2, 1: 4, 2: 11, 3: 22, 5: 4, 6: 11, 7: 22, 8: 96, 9: 48, 10: 24, 11: 12, 12: 108, 13: 72,
+                 14: 36, 15: 18}
+    PHY_2M_LONG = 1
+
+    def __init__(self, port, channel, host_mac, forward_all=False, emit=print):
+        import serial  # pyserial
+        self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=1)
+        self.channel = channel
+        self.freq = 2484 if channel == 14 else 2407 + 5 * channel
+        self.emit = emit
+        self.buf = bytearray()
+        self.pending = []
+        self.tx_errors = 0
+        self.want_poll = False
+        self.ser.reset_input_buffer()
+        self._write(b"C", bytes([channel]) + bytes(host_mac) + bytes([self.PHY_2M_LONG, 1 if forward_all else 0]))
+        deadline = time.time() + 5
+        self.ready = False
+        while time.time() < deadline and not self.ready:
+            select.select([self.ser], [], [], 0.1)
+            self._fill()
+        if not self.ready:
+            raise OSError("no answer from the ESP32 modem on %s (flashed? see esp32c3_modem/)" % port)
+
+    def fileno(self):
+        return self.ser.fileno()
+
+    def close(self):
+        self.ser.close()
+
+    def _write(self, kind, payload):
+        n = len(payload)
+        x = kind[0] ^ (n & 0xFF) ^ (n >> 8)
+        for b in payload:
+            x ^= b
+        self.ser.write(b"\xaa\x55" + kind + struct.pack("<H", n) + payload + bytes([x]))
+
+    def send(self, data):
+        frame = bytes(data[9:])                       # strip tx_radiotap()
+        self._write(b"T", frame)
+        self.pending.append(struct.pack("<BBHIB", 0, 0, 9, 1 << 2, 4) + frame)   # loopback copy, like a monitor socket
+        return len(data)
+
+    def _fill(self):
+        d = self.ser.read(65536)
+        if d:
+            self.buf += d
+        b = self.buf
+        while True:
+            i = b.find(b"\xaa\x55")
+            if i < 0:
+                del b[:max(0, len(b) - 1)]
+                return
+            if i:
+                del b[:i]
+            if len(b) < 5:
+                return
+            kind, n = b[2], struct.unpack_from("<H", b, 3)[0]
+            if n > 4096:
+                del b[:2]
+                continue
+            if len(b) < 6 + n:
+                return
+            payload = bytes(b[5:5 + n])
+            x = kind ^ (n & 0xFF) ^ (n >> 8)
+            for c in payload:
+                x ^= c
+            if x != b[5 + n]:
+                del b[:2]                             # not a real frame start: resync
+                continue
+            del b[:6 + n]
+            self._handle(kind, payload)
+
+    def _handle(self, kind, p):
+        if kind == ord("R") and len(p) > 6:
+            rssi, rate = struct.unpack_from("<bB", p, 0)
+            rt = struct.pack("<BBHIBBHHb", 0, 0, 15, (1 << 2) | (1 << 3) | (1 << 5),
+                             self.RATE_500K.get(rate, 0), 0, self.freq, 0x00A0, rssi)
+            self.pending.append(rt + p[6:])
+        elif kind == ord("S"):
+            text = p.decode("ascii", "replace")
+            if text.startswith("ready"):
+                self.ready = True
+            self.emit("# esp32: " + text)
+        elif kind == ord("E") and len(p) >= 6:
+            self.tx_errors += 1
+            if self.tx_errors <= 5 or self.tx_errors % 1000 == 0:
+                err, fc = struct.unpack_from("<iH", p, 0)
+                self.emit("# esp32: TX error %d (0x%x) for frame control %04x, %d errors so far"
+                          % (err, err, fc, self.tx_errors))
+
+    def recvfrom(self, n):
+        if not self.pending:
+            self._fill()
+        if not self.pending:
+            raise BlockingIOError()
+        return self.pending.pop(0), None
+
+
 class GuiBridge:
     """Localhost JSON-lines link between `host` (root) and pictochat_gui.py (normal user).
 
@@ -1175,6 +1283,8 @@ def host(args):
         return
     if args.bridge:
         sock = BridgeSock(args.bridge, args.channel, src)
+    elif args.serial:
+        sock = SerialSock(args.serial, args.channel, src, forward_all=args.all)
     else:
         if not args.iface:
             sys.exit("--iface is required (or use --bridge PORT for the emulator)")
@@ -1198,6 +1308,9 @@ def host(args):
         print(line)
         logf.write(line + "\n")
         logf.flush()
+
+    if isinstance(sock, SerialSock):
+        sock.emit = emit
         if bridge:
             bridge.send({"kind": "log", "t": time.time() - t0, "text": msg})
 
@@ -1560,6 +1673,8 @@ def main():
     h.add_argument("--cmdcount", type=lambda x: int(x, 0), default=0x54, help="value in the ACK's first word (run-ahead; meaning partly unknown)")
     h.add_argument("--no-hostpkt", action="store_true", help="send empty polls (no PictoChat-layer packet in the CMD data)")
     h.add_argument("--lockstep", action="store_true", help="TEST (--bridge only): poll whenever the emulated client waits for a poll instead of on a wall-clock timer")
+    h.add_argument("--serial", metavar="TTY", help="use the ESP32-C3 radio modem (esp32c3_modem/) on this serial "
+                   "port, e.g. /dev/ttyACM0, instead of a monitor-mode adapter (no root needed)")
     h.add_argument("--bridge", type=int, default=0, help="TEST: connect to the melonDS harness on 127.0.0.1:PORT instead of a radio")
     h.add_argument("--gui-port", type=int, default=0, help="listen on 127.0.0.1:PORT for pictochat_gui.py (0 = off)")
     h.add_argument("--echo", action="store_true", help="(obsolete, ignored) EXPERIMENT: echo the DS's port 0xE message fragments back (the first real run froze/crashed the DS's PictoChat)")
