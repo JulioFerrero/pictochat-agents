@@ -464,6 +464,11 @@ pub struct MultiplayHost {
     pub clients: BTreeMap<u8, Client>,
     pub queue: VecDeque<Unit>,
     pub now: f64,            // current time (seconds), set by the caller; used for queue bookkeeping
+    /// Minimum sends of a middle fragment (host messages and echoes). PictoChat takes in about one packet per
+    /// 60-Hz frame (16.7 ms): a fragment replaced by the next one sooner is silently lost, and the DS shows what
+    /// was left in its buffer from the previous message there. The caller sets this from the poll interval so a
+    /// fragment stays on the air for at least ~25 ms. First and last fragments always get at least 5.
+    pub mid_min_sent: u8,
     held: Vec<Vec<u8>>,
     seen_d0: HashMap<u32, f64>,
     seen_e: HashMap<Vec<u8>, f64>,
@@ -477,7 +482,7 @@ impl MultiplayHost {
     pub fn new(mac: Mac, name: &str, color: u16, seed: u64, repeats: u8) -> Self {
         MultiplayHost {
             mac, name: name.to_string(), color, rng: seed | 1, repeats, clients: BTreeMap::new(),
-            queue: VecDeque::new(), now: 0.0, held: Vec::new(), seen_d0: HashMap::new(), seen_e: HashMap::new(),
+            queue: VecDeque::new(), now: 0.0, mid_min_sent: 3, held: Vec::new(), seen_d0: HashMap::new(), seen_e: HashMap::new(),
             asm: HashMap::new(), messages: Vec::new(), sent_ready: HashSet::new(), logs: Vec::new(),
         }
     }
@@ -535,9 +540,10 @@ impl MultiplayHost {
         let frs = fragments(msg_id, data, junk);
         let n = frs.len();
         for (i, fr) in frs.into_iter().enumerate() {
-            // middle fragments may move on as soon as a client confirmed them; the first and the last keep the full
-            // count, because PictoChat can drop a packet it received while it was still busy with its previous step
-            items.push(self.item(0xE, fr, None, if i == 0 || i + 1 == n { 5 } else { 1 }));
+            // middle fragments move on once confirmed and on the air long enough (mid_min_sent); the first and the
+            // last keep at least 5, because PictoChat can drop a packet it received while busy with its previous step
+            let edge = i == 0 || i + 1 == n;
+            items.push(self.item(0xE, fr, None, if edge { self.mid_min_sent.max(5) } else { self.mid_min_sent }));
         }
         let u = self.host_unit(items, label);
         self.queue.push_back(u);
@@ -669,10 +675,10 @@ impl MultiplayHost {
                 return;
             }
             self.seen_e.insert(pl.to_vec(), now);
-            // rebroadcast verbatim; like the host's own messages, middle fragments move on once a poll carrying them
-            // was answered by everyone, the first and the last keep the full count (min 5 sends)
+            // rebroadcast verbatim, with the same repeat rule as the host's own messages (see mid_min_sent)
             let edge = off == 0 || last != 0;
-            let echo = self.item(0xE, pl.to_vec(), None, if edge { 5 } else { 1 });
+            let min = if edge { self.mid_min_sent.max(5) } else { self.mid_min_sent };
+            let echo = self.item(0xE, pl.to_vec(), None, min);
             if stage == Stage::Joined {
                 let u = self.client_unit(mid);
                 u.items.push_back(echo);

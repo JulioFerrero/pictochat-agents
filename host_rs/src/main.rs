@@ -44,6 +44,8 @@ const USAGE: &str = "usage: pictochat-host [options]
   --cmd-word N          third CMD body word of empty polls (default 0)
   --cmdcount N          first word of the ACK (default 0x54)
   --hello-repeats N     maximum number of polls that carry each packet (default 8)
+  --min-air-ms MS       keep each message fragment on the air at least this long; the DS takes in about one packet
+                        per 16.7-ms frame and loses the rest (default 25)
   --no-confirm          always send every packet --hello-repeats times
   --poll-cycle N        address the clients on every Nth poll (default 1)
   --seed N              beacon LCG seed (default random)
@@ -65,6 +67,7 @@ struct Args {
     cmd_word: u16,
     cmdcount: u16,
     hello_repeats: u8,
+    min_air_ms: f64,
     confirm: bool,
     poll_cycle: u8,
     seed: Option<u32>,
@@ -84,7 +87,7 @@ fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         serial: "/dev/ttyACM0".into(), channel: 1, mac: [0x00, 0x1b, 0x7a, 0x00, 0x00, 0x01], room: 0,
         name: "py".into(), color: 2, gui_port: 0, out: "host_log".into(), pcap: true, mp_period_ms: 7.0,
-        reply_wait: 4.0, clienttime: 0x3E6, cmd_word: 0, cmdcount: 0x54, hello_repeats: 8, confirm: true,
+        reply_wait: 4.0, clienttime: 0x3E6, cmd_word: 0, cmdcount: 0x54, hello_repeats: 8, min_air_ms: 25.0, confirm: true,
         poll_cycle: 1, seed: None, all: false,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -114,6 +117,7 @@ fn parse_args() -> Result<Args, String> {
             "--cmd-word" => a.cmd_word = parse_int(v)? as u16,
             "--cmdcount" => a.cmdcount = parse_int(v)? as u16,
             "--hello-repeats" => a.hello_repeats = parse_int(v)?.clamp(1, 255) as u8,
+            "--min-air-ms" => a.min_air_ms = v.parse().map_err(|_| "bad --min-air-ms")?,
             "--no-confirm" => a.confirm = false,
             "--poll-cycle" => a.poll_cycle = parse_int(v)?.clamp(1, 255) as u8,
             "--seed" => a.seed = Some(parse_int(v)? as u32),
@@ -274,6 +278,9 @@ impl Host {
     }
 
     fn mp_config(&mut self) {
+        // sends per middle fragment so it stays on the air for --min-air-ms (see MultiplayHost::mid_min_sent)
+        let n = (self.a.min_air_ms / self.a.mp_period_ms.max(0.5)).ceil().clamp(1.0, self.a.hello_repeats as f64);
+        self.ml.mid_min_sent = n as u8;
         let a = &self.a;
         let r = self.modem.mp_config(true, a.clienttime, a.cmd_word, a.cmdcount, (a.mp_period_ms * 1000.0) as u32,
                                      (a.reply_wait * 1000.0) as u32, a.poll_cycle);
@@ -350,7 +357,8 @@ impl Host {
                 if let Some(ms) = c.get("ms").and_then(|v| v.as_f64()) {
                     self.a.mp_period_ms = ms;
                     self.mp_config();
-                    self.emit(&format!("# gui: ESP32 poll interval now {:.2} ms", ms));
+                    self.emit(&format!("# gui: ESP32 poll interval now {:.2} ms, each fragment sent at least {} times",
+                                       ms, self.ml.mid_min_sent));
                 }
             }
             "echo" => self.emit("# gui: the host always echoes client messages (echo setting ignored)"),
@@ -562,8 +570,9 @@ fn run() -> Result<(), String> {
     let _ = h.modem.mp_clear();
     h.sync_clients(false);
     h.emit(&format!(
-        "# beaconing as {} on channel {}, room index {} (0=A); polling on the ESP32 every {:.1} ms; logging to {}.log{}",
-        mac_str(&mac), ch, h.a.room, h.a.mp_period_ms, h.a.out, if h.a.pcap { " / .pcap" } else { "" }));
+        "# beaconing as {} on channel {}, room index {} (0=A); polling on the ESP32 every {:.1} ms, each fragment \
+         sent at least {} times; logging to {}.log{}",
+        mac_str(&mac), ch, h.a.room, h.a.mp_period_ms, h.ml.mid_min_sent, h.a.out, if h.a.pcap { " / .pcap" } else { "" }));
 
     let mut next_beacon = Instant::now();
     let mut next_status = Instant::now() + Duration::from_secs(5);
