@@ -1294,6 +1294,15 @@ def handle_gui_cmd(c, args, ml, src, emit, gui):
         elif cmd == "chat":     # {"cmd":"chat","pixels":[[...]*256]*80} palette indices
             msg = ml.send_chat(bitmap_to_image(c["pixels"]))
             gui("message", id=0, hex=msg.hex(), dir="tx")
+        elif cmd == "mp_period":  # {"cmd":"mp_period","ms":5}: change the ESP32 poll interval while running (--offload)
+            sock = getattr(args, "_sock", None)
+            if sock is None or not getattr(args, "_offload", False):
+                emit("# gui: mp_period needs --serial with --offload")
+            else:
+                args.mp_period_ms = float(c["ms"])
+                sock.mp_config(True, args.clienttime, args.cmd_word, args.cmdcount, args.mp_period_ms * 1000,
+                               args.reply_wait * 1000, args.poll_cycle)
+                emit("# gui: ESP32 poll interval now %.2f ms" % args.mp_period_ms)
         elif cmd == "echo":
             emit("# gui: the host always echoes client messages now (echo setting ignored)")
         elif cmd in ("say", "draw"):
@@ -1361,6 +1370,7 @@ def host(args):
                            args.reply_wait * 1000, args.poll_cycle)
         elif sock.mp:
             sock.mp_config(False, args.clienttime, args.cmd_word, args.cmdcount, 0, 0, 1)
+        args._sock, args._offload = sock, offload
         emit("# polling: %s" % ("on the ESP32 every %.1f ms (multiplay offload)" % args.mp_period_ms if offload
                                  else "from this program every %.1f ms" % args.poll_ms))
 
@@ -1734,8 +1744,8 @@ def main():
     h.add_argument("--no-setup", action="store_true")
     h.add_argument("--out", default="host_log", help="log/pcap basename (default host_log)")
     h.add_argument("--all", action="store_true", help="log every frame heard, not just DS-related ones")
-    h.add_argument("--mp-period-ms", type=float, default=2.5, help="with --serial and the offload firmware: interval between polls on the ESP32 (real host: ~2.2 ms)")
-    h.add_argument("--offload", action="store_true", help="EXPERIMENTAL, with --serial and the offload firmware: run the poll loop on the ESP32 (first test: the DS did not answer and the flood of polls knocked a nearby Pi's Wi-Fi out)")
+    h.add_argument("--mp-period-ms", type=float, default=7.0, help="with --offload: interval between polls on the ESP32. Real DS, 15 s per step: 20 ms 92%% answered, 10 ms 96%%, 7 ms 91%%, 5 ms 79%%; a full drawing took 2.2 s at 7 ms (5.8 s with polling from Python). 2.5 ms: the DS stopped answering and a Pi next to the ESP32 lost Wi-Fi")
+    h.add_argument("--offload", action="store_true", help="with --serial and the offload firmware: run the poll / reply / ACK loop on the ESP32 (see --mp-period-ms)")
     h.add_argument("--poll-ms", type=float, default=5.0, help="interval between CMD polls once a DS is associated (real host: ~2.2 ms; 20 ms worked but made messages slow)")
     h.add_argument("--clienttime", type=lambda x: int(x, 0), default=0x3E6, help="CMD clienttime (reply window per client, us); 0xD0 + 4*max reply bytes")
     h.add_argument("--cmd-word", type=lambda x: int(x, 0), default=0, help="third CMD body word (meaning unknown)")

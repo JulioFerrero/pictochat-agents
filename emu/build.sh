@@ -18,6 +18,9 @@ M=melonDS
 g++ -O2 -std=gnu++17 -fwrapv -Wno-invalid-offsetof -DARCHITECTURE_x86_64=1 -DJIT_ENABLED \
     -I$M/src -I$M/src/net -I$M/build/src harness.cpp $M/src/net/LocalMP.cpp \
     $M/build/src/libcore.a $M/build/src/teakra/src/libteakra.a -lpthread -lrt -o harness
+g++ -O2 -std=gnu++17 -fwrapv -Wno-invalid-offsetof -DARCHITECTURE_x86_64=1 -DJIT_ENABLED \
+    -I$M/src -I$M/build/src romrun.cpp \
+    $M/build/src/libcore.a $M/build/src/teakra/src/libteakra.a -lpthread -lrt -o romrun
 mkdir -p fw
 [ -f fw/firmware.bin ] || (cd fw && unzip -o -q "$ZIP" bios7.bin bios9.bin firmware.bin)
 echo "built ./harness; first run: ./start.sh out.pcap 2, then ./wizard.sh after the first tap (see ../pictochat.md, section 8)"
