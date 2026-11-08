@@ -1308,11 +1308,11 @@ def host(args):
         print(line)
         logf.write(line + "\n")
         logf.flush()
+        if bridge:
+            bridge.send({"kind": "log", "t": time.time() - t0, "text": msg})
 
     if isinstance(sock, SerialSock):
         sock.emit = emit
-        if bridge:
-            bridge.send({"kind": "log", "t": time.time() - t0, "text": msg})
 
     def gui(kind, **kw):
         if bridge:
