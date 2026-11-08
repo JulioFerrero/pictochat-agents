@@ -10,7 +10,8 @@ Run the host with the GUI port, then this window as your normal user:
 A PictoChat message is a picture (256 x 80 pixels, see pictochat.md 5b item 19). So:
   * draw with the mouse on the canvas and press "Send drawing", or
   * type text and press "Send text" (needs Pillow: it renders the text into the picture), or
-  * press "Load image..." to dither a picture file onto the canvas (Floyd-Steinberg, or threshold), then send it.
+  * press "Load image..." to dither a picture file onto the canvas (Floyd-Steinberg, or threshold; "colour" maps
+    it to PictoChat's 16-colour palette), then send it. The pen row picks the ink colour for drawing and text.
 Messages are held until a DS has finished joining the room and are then sent from the host.
 
 Left: every packet from the DS (rx) and every packet we queue for it (tx); yellow rows are complete messages.
@@ -39,7 +40,12 @@ from tkinter import ttk
 
 PW, PH = 256, 80                  # size of a PictoChat message picture
 SCALE = 2
-PALETTE = {0: (255, 255, 255), 1: (0, 0, 0)}
+# PictoChat's 16-colour palette as shown by the DS (measured on the emulated DS Lite): 0 = paper, 1 = black ink,
+# 2 = light grey, 3-15 = the rainbow pen colours from magenta through red, yellow, green and cyan to blue.
+PALETTE = {0: (251, 251, 251), 1: (0, 0, 0), 2: (211, 203, 195), 3: (235, 0, 235), 4: (251, 0, 138),
+           5: (251, 0, 40), 6: (251, 73, 0), 7: (251, 162, 0), 8: (227, 243, 0), 9: (130, 251, 0),
+           10: (16, 251, 32), 11: (0, 251, 186), 12: (0, 195, 251), 13: (0, 121, 251), 14: (0, 48, 251),
+           15: (40, 0, 251)}
 # what the DS shows of the picture (measured on the emulated DS): columns 23-252; the sender's name tab covers
 # columns 0-80 of rows 0-15. Ink outside is invisible or drawn over the bubble frame, so it is clipped before sending.
 VIS_X0, VIS_X1, TAB_X1, TAB_Y1 = 23, 252, 80, 15
@@ -138,7 +144,7 @@ def pixels_to_ppm(rows, shade=False):
     return bytes(out)
 
 
-def text_to_pixels(text):
+def text_to_pixels(text, color=1):
     """Render text into the 80 x 256 picture with Pillow (None without Pillow). The DS shows picture columns ~22-252
     and its name tab covers the top-left of the first 16-px line, so text goes on lines 2-5 (16 px each), x >= 26."""
     try:
@@ -171,22 +177,39 @@ def text_to_pixels(text):
     for i, ln in enumerate(lines[:4]):
         d.text((x0, 17 + 16 * i), ln, fill=255, font=font)
     px = img.load()
-    return [[1 if px[x, yy] > 110 else 0 for x in range(PW)] for yy in range(PH)]
+    return [[color if px[x, yy] > 110 else 0 for x in range(PW)] for yy in range(PH)]
 
 
-def image_to_pixels(path, dither=True, invert=False):
+def image_to_pixels(path, dither=True, invert=False, color=False):
     """Load an image file (any format Pillow reads), fit it into the part of the picture the DS shows below the name
     tab (columns 23-252, rows 16-79: 230 x 64 px, aspect ratio kept, centred) and convert it to 1-bit ink with
-    Floyd-Steinberg dithering (or a plain threshold). Returns 80 rows of 256 palette indices, or raises ImportError."""
+    Floyd-Steinberg dithering (or a plain threshold). With color=True the image is mapped to PictoChat's 16-colour
+    palette (PALETTE) instead of black and white. Returns 80 rows of 256 palette indices, or raises ImportError."""
     from PIL import Image, ImageOps
     img = Image.open(path)
     img = ImageOps.exif_transpose(img).convert("RGBA")
     bg = Image.new("RGBA", img.size, (255, 255, 255, 255))      # transparent parts become white
-    img = Image.alpha_composite(bg, img).convert("L")
-    img = ImageOps.autocontrast(img, cutoff=1)
+    img = Image.alpha_composite(bg, img).convert("RGB")
+    bw, bh = VIS_X1 - VIS_X0 + 1, PH - (TAB_Y1 + 1)
     if invert:
         img = ImageOps.invert(img)
-    bw, bh = VIS_X1 - VIS_X0 + 1, PH - (TAB_Y1 + 1)
+    if color:
+        img.thumbnail((bw, bh), Image.LANCZOS)
+        pal = Image.new("P", (1, 1))
+        flat = []
+        for i in range(16):
+            flat += list(PALETTE[i])
+        pal.putpalette(flat + flat[-3:] * (256 - 16))           # pad with the last colour, never chosen twice
+        q8 = img.quantize(palette=pal, dither=Image.FLOYDSTEINBERG if dither else Image.NONE)
+        ox = VIS_X0 + (bw - q8.width) // 2
+        oy = TAB_Y1 + 1 + (bh - q8.height) // 2
+        rows = blank()
+        px = q8.load()
+        for y in range(q8.height):
+            for x in range(q8.width):
+                rows[oy + y][ox + x] = min(px[x, y], 15)
+        return rows
+    img = ImageOps.autocontrast(img.convert("L"), cutoff=1)
     img.thumbnail((bw, bh), Image.LANCZOS)
     one = img.convert("1", dither=Image.FLOYDSTEINBERG if dither else Image.NONE)
     ox = VIS_X0 + (bw - one.width) // 2
@@ -204,7 +227,7 @@ def blank():
     return [[0] * PW for _ in range(PH)]
 
 
-def draw_line(rows, x0, y0, x1, y1, width=2):
+def draw_line(rows, x0, y0, x1, y1, width=2, color=1):
     """Bresenham line with a small square pen into the picture."""
     dx, dy = abs(x1 - x0), -abs(y1 - y0)
     sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
@@ -214,7 +237,7 @@ def draw_line(rows, x0, y0, x1, y1, width=2):
             for oy in range(width):
                 x, y = x0 + ox, y0 + oy
                 if 0 <= x < PW and 0 <= y < PH:
-                    rows[y][x] = 1
+                    rows[y][x] = color
         if x0 == x1 and y0 == y1:
             break
         e2 = 2 * err
@@ -341,7 +364,22 @@ class App:
         self.invert_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(brow, text="dither", variable=self.dither_var, command=self.reload_image).pack(side="left", padx=(6, 0))
         ttk.Checkbutton(brow, text="invert", variable=self.invert_var, command=self.reload_image).pack(side="left")
+        self.color_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(brow, text="colour", variable=self.color_var, command=self.reload_image).pack(side="left")
         self.image_path = None
+        prow = ttk.Frame(right_b)
+        prow.pack(fill="x", pady=(4, 0))
+        ttk.Label(prow, text="pen:").pack(side="left")
+        self.pen = 1
+        self.swatches = {}
+        for i in range(1, 16):
+            r_, g_, b_ = PALETTE[i]
+            sw = tk.Label(prow, width=2, bg="#%02x%02x%02x" % (r_, g_, b_), relief="raised", bd=2)
+            sw.pack(side="left", padx=1)
+            sw.bind("<Button-1>", lambda e, i=i: self.set_pen(i))
+            self.swatches[i] = sw
+        ttk.Label(prow, text="(also used for Send text)").pack(side="left", padx=4)
+        self.set_pen(1)
 
         self.refresh_canvas()
         threading.Thread(target=self.net, daemon=True).start()
@@ -495,21 +533,29 @@ class App:
 
     def pen_down(self, e):
         self.last = (min(PW - 1, e.x // SCALE), min(PH - 1, e.y // SCALE))
-        draw_line(self.pixels, *self.last, *self.last)
+        draw_line(self.pixels, *self.last, *self.last, color=self.pen)
         self.canvas.create_rectangle(self.last[0] * SCALE, self.last[1] * SCALE, self.last[0] * SCALE + 2 * SCALE,
-                                     self.last[1] * SCALE + 2 * SCALE, fill="black", outline="black")
+                                     self.last[1] * SCALE + 2 * SCALE, fill=self.pen_hex(), outline=self.pen_hex())
 
     def pen_move(self, e):
         if self.last is None:
             return
         x, y = max(0, min(PW - 1, e.x // SCALE)), max(0, min(PH - 1, e.y // SCALE))
-        draw_line(self.pixels, self.last[0], self.last[1], x, y)
+        draw_line(self.pixels, self.last[0], self.last[1], x, y, color=self.pen)
         self.canvas.create_line(self.last[0] * SCALE + SCALE, self.last[1] * SCALE + SCALE, x * SCALE + SCALE,
-                                y * SCALE + SCALE, width=2 * SCALE, capstyle="round", fill="black")
+                                y * SCALE + SCALE, width=2 * SCALE, capstyle="round", fill=self.pen_hex())
         self.last = (x, y)
+
+    def pen_hex(self):
+        return "#%02x%02x%02x" % PALETTE[self.pen]
 
     def pen_up(self, _e):
         self.last = None
+
+    def set_pen(self, i):
+        self.pen = i
+        for k, sw in self.swatches.items():
+            sw.configure(relief="sunken" if k == i else "raised")
 
     def pick_image(self):
         from tkinter import filedialog
@@ -520,7 +566,7 @@ class App:
 
     def load_image(self, path):
         try:
-            self.pixels = image_to_pixels(path, self.dither_var.get(), self.invert_var.get())
+            self.pixels = image_to_pixels(path, self.dither_var.get(), self.invert_var.get(), self.color_var.get())
         except ImportError:
             self.logline("# Pillow is not installed (pip install pillow): cannot load images")
             return
@@ -546,7 +592,7 @@ class App:
         text = self.text_entry.get().strip()
         if not text:
             return
-        px = text_to_pixels(text)
+        px = text_to_pixels(text, self.pen)
         if px is None:
             self.logline("# Pillow is not installed: text cannot be rendered (pip install pillow); draw instead")
             return
@@ -593,11 +639,11 @@ class App:
             self.clear_canvas()
         elif c == "pen":
             x, y = int(w[1]), int(w[2])
-            draw_line(self.pixels, x, y, x, y)
+            draw_line(self.pixels, x, y, x, y, color=self.pen)
             self.refresh_canvas()
         elif c == "line":
             x1, y1, x2, y2 = (int(v) for v in w[1:5])
-            draw_line(self.pixels, x1, y1, x2, y2)
+            draw_line(self.pixels, x1, y1, x2, y2, color=self.pen)
             self.refresh_canvas()
         elif c == "announce":
             self.send({"cmd": "announce", "name": w[1] if len(w) > 1 else ""})
