@@ -418,6 +418,29 @@ pub struct Item {
     pub min_sent: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Owner {
+    Host,
+    Client(u8),
+}
+
+/// Packets that must go out back to back: a host message (token grant to itself + fragments), a joined DS's message
+/// (the grant we give it + the echo of each fragment as it arrives), or a single packet. PictoChat lets one sender
+/// at a time hold the token, so a host message must never start inside a DS message (the first queue was strictly
+/// FIFO: a bot reply queued while the DS was sending went out between the DS's echoes, and the DS's remaining
+/// echoes waited behind the whole reply, which greyed out the DS's send button).
+pub struct Unit {
+    pub items: VecDeque<Item>,
+    pub owner: Owner,
+    pub open: bool,          // a DS message still arriving: more echoes will be appended
+    pub started: bool,       // at least one packet handed to the modem
+    pub last_activity: f64,
+    pub label: Option<(String, f64)>, // host chat message: description, time queued (for the delivery log)
+}
+
+/// An open DS message unit with no new fragment for this long is given up (the DS left or lost the token).
+const CLIENT_UNIT_TIMEOUT: f64 = 2.0;
+
 /// A message being received from a DS, fragment by fragment. Complete when every byte up to the end of the last
 /// fragment has arrived (pictochat.py completed on the last fragment alone, so a late repeat of a finished
 /// message's last fragment produced a second, zero-filled copy).
@@ -439,7 +462,8 @@ pub struct MultiplayHost {
     rng: u64,
     pub repeats: u8,
     pub clients: BTreeMap<u8, Client>,
-    pub queue: VecDeque<Item>,
+    pub queue: VecDeque<Unit>,
+    pub now: f64,            // current time (seconds), set by the caller; used for queue bookkeeping
     held: Vec<Vec<u8>>,
     seen_d0: HashMap<u32, f64>,
     seen_e: HashMap<Vec<u8>, f64>,
@@ -453,7 +477,7 @@ impl MultiplayHost {
     pub fn new(mac: Mac, name: &str, color: u16, seed: u64, repeats: u8) -> Self {
         MultiplayHost {
             mac, name: name.to_string(), color, rng: seed | 1, repeats, clients: BTreeMap::new(),
-            queue: VecDeque::new(), held: Vec::new(), seen_d0: HashMap::new(), seen_e: HashMap::new(),
+            queue: VecDeque::new(), now: 0.0, held: Vec::new(), seen_d0: HashMap::new(), seen_e: HashMap::new(),
             asm: HashMap::new(), messages: Vec::new(), sent_ready: HashSet::new(), logs: Vec::new(),
         }
     }
@@ -487,23 +511,76 @@ impl MultiplayHost {
         p
     }
 
-    pub fn put(&mut self, port: u8, payload: Vec<u8>, repeats: Option<u8>, min_sent: u8) {
-        let repeats = repeats.unwrap_or(self.repeats);
-        self.queue.push_back(Item { port, payload, repeats, min_sent });
+    fn item(&self, port: u8, payload: Vec<u8>, repeats: Option<u8>, min_sent: u8) -> Item {
+        Item { port, payload, repeats: repeats.unwrap_or(self.repeats), min_sent }
     }
 
-    /// Queue a whole message from the host: token grant to itself, then each fragment.
-    pub fn put_message(&mut self, data: &[u8], msg_id: u8) {
+    fn host_unit(&self, items: Vec<Item>, label: Option<String>) -> Unit {
+        Unit { items: items.into(), owner: Owner::Host, open: false, started: false, last_activity: self.now,
+               label: label.map(|l| (l, self.now)) }
+    }
+
+    /// Queue a single packet (at the back).
+    pub fn put(&mut self, port: u8, payload: Vec<u8>, repeats: Option<u8>, min_sent: u8) {
+        let it = self.item(port, payload, repeats, min_sent);
+        let u = self.host_unit(vec![it], None);
+        self.queue.push_back(u);
+    }
+
+    /// Queue a whole message from the host: token grant to itself, then each fragment, as one unit.
+    pub fn put_message(&mut self, data: &[u8], msg_id: u8, label: Option<String>) {
         let r = self.rand();
-        self.put(0xD, type1_payload(msg_id, data.len() as u32, r), None, 5);
+        let mut items = vec![self.item(0xD, type1_payload(msg_id, data.len() as u32, r), None, 5)];
         let junk = self.rand() as u8;
         let frs = fragments(msg_id, data, junk);
         let n = frs.len();
         for (i, fr) in frs.into_iter().enumerate() {
             // middle fragments may move on as soon as a client confirmed them; the first and the last keep the full
             // count, because PictoChat can drop a packet it received while it was still busy with its previous step
-            self.put(0xE, fr, None, if i == 0 || i + 1 == n { 5 } else { 1 });
+            items.push(self.item(0xE, fr, None, if i == 0 || i + 1 == n { 5 } else { 1 }));
         }
+        let u = self.host_unit(items, label);
+        self.queue.push_back(u);
+    }
+
+    /// The open unit of a joined DS's message, created if needed: right after the unit being sent (and after
+    /// other DS units already waiting there), ahead of host messages that have not started.
+    fn client_unit(&mut self, cid: u8) -> &mut Unit {
+        if let Some(i) = self.queue.iter().position(|u| u.owner == Owner::Client(cid) && u.open) {
+            return &mut self.queue[i];
+        }
+        let mut pos = match self.queue.front() {
+            Some(u) if u.started => 1,
+            _ => 0,
+        };
+        while pos < self.queue.len() && matches!(self.queue[pos].owner, Owner::Client(_)) {
+            pos += 1;
+        }
+        let u = Unit { items: VecDeque::new(), owner: Owner::Client(cid), open: true, started: false,
+                       last_activity: self.now, label: None };
+        self.queue.insert(pos, u);
+        &mut self.queue[pos]
+    }
+
+    /// The next packet for the modem, and the label of a host chat message whose last packet this is. Waits (None)
+    /// while the unit being sent is a DS message whose next fragment has not arrived yet.
+    pub fn pop_item(&mut self, now: f64) -> Option<(Item, Option<(String, f64)>)> {
+        loop {
+            let f = self.queue.front_mut()?;
+            if let Some(it) = f.items.pop_front() {
+                f.started = true;
+                let label = if f.items.is_empty() && !f.open { f.label.take() } else { None };
+                return Some((it, label));
+            }
+            if f.open && now - f.last_activity < CLIENT_UNIT_TIMEOUT {
+                return None;
+            }
+            self.queue.pop_front();
+        }
+    }
+
+    pub fn queued_packets(&self) -> usize {
+        self.queue.iter().map(|u| u.items.len()).sum()
     }
 
     pub fn any_joined(&self) -> bool {
@@ -519,7 +596,7 @@ impl MultiplayHost {
             .unwrap_or(1);
         let msg = chat_message(&self.mac, &image[..(lines * 2048).min(image.len())]);
         if self.any_joined() {
-            self.put_message(&msg, 0);
+            self.put_message(&msg, 0, Some(format!("chat message ({} bytes)", msg.len())));
             self.log(format!("queued chat message ({} bytes, {} fragments)", msg.len(), (msg.len() + 159) / 160));
         } else {
             self.held.push(msg.clone());
@@ -564,13 +641,23 @@ impl MultiplayHost {
             let info = self.typed(4, r);
             self.put(0xC, info, Some(9), 5);
             let m = member_info_message(0, &self.mac, &self.name.clone(), self.color);
-            self.put_message(&m, 0);
+            self.put_message(&m, 0, None);
             self.log(format!("client {} hello -> host info + host member message", aid));
         } else if port == 0xD && ptype == 0 && pl.len() >= 20 {
             let (cid, want, echo) = (pl[4], u32le(pl, 8), u32le(pl, 16));
             if now - self.seen_d0.get(&echo).copied().unwrap_or(-9.0) > 0.5 {
                 self.seen_d0.insert(echo, now);
-                self.put(0xD, type1_payload(cid, want, echo), None, 5); // after what is already queued
+                let grant = self.item(0xD, type1_payload(cid, want, echo), None, 5);
+                if stage == Stage::Joined {
+                    // the DS's message goes ahead of host messages that have not started
+                    let u = self.client_unit(cid);
+                    u.items.push_back(grant);
+                    u.last_activity = now;
+                } else {
+                    // during the join: after what is already queued, as the real host does
+                    let u = self.host_unit(vec![grant], None);
+                    self.queue.push_back(u);
+                }
                 self.log(format!("token request from id {} for a {}-byte message (random {:08x}) -> grant",
                                  cid, want, echo));
             }
@@ -585,7 +672,18 @@ impl MultiplayHost {
             // rebroadcast verbatim; like the host's own messages, middle fragments move on once a poll carrying them
             // was answered by everyone, the first and the last keep the full count (min 5 sends)
             let edge = off == 0 || last != 0;
-            self.put(0xE, pl.to_vec(), None, if edge { 5 } else { 1 });
+            let echo = self.item(0xE, pl.to_vec(), None, if edge { 5 } else { 1 });
+            if stage == Stage::Joined {
+                let u = self.client_unit(mid);
+                u.items.push_back(echo);
+                u.last_activity = now;
+                if last != 0 {
+                    u.open = false;
+                }
+            } else {
+                let u = self.host_unit(vec![echo], None);
+                self.queue.push_back(u);
+            }
             let data = &pl[12..(12 + flen).min(pl.len())];
             if off == 0 {
                 self.asm.remove(&mid); // a new message from this sender starts
@@ -614,14 +712,14 @@ impl MultiplayHost {
                 if msg.starts_with(&[3, 0]) && !self.sent_ready.contains(&aid) {
                     self.sent_ready.insert(aid);
                     let m = member_info_message(1, &self.mac, &self.name.clone(), self.color);
-                    self.put_message(&m, 0);
+                    self.put_message(&m, 0, None);
                 } else if msg.starts_with(&[3, 1]) {
                     // the real host answers a newcomer's 03 01 with its own 03 01 once more
                     let m = member_info_message(1, &self.mac, &self.name.clone(), self.color);
-                    self.put_message(&m, 0);
+                    self.put_message(&m, 0, None);
                     self.clients.get_mut(&aid).unwrap().stage = Stage::Joined;
                     for h in std::mem::take(&mut self.held) {
-                        self.put_message(&h, 0);
+                        self.put_message(&h, 0, Some(format!("chat message ({} bytes, held until the join)", h.len())));
                     }
                     self.log(format!("client {} joined", aid));
                 }
@@ -651,6 +749,48 @@ mod tests {
         // the last fragment repeated a second later must not produce a second (zero-filled) message
         h.on_reply(1, 0xE, frs.last().unwrap(), 2.0);
         assert_eq!(h.messages.len(), 1);
+    }
+
+    /// A joined DS's message goes ahead of a host message that has not started, is never split by one, and
+    /// a host message that has started is finished first.
+    #[test]
+    fn ds_message_has_priority() {
+        let me = [0, 0x1b, 0x7a, 0, 0, 1];
+        let ds = [0, 0x1b, 0x7a, 1, 2, 3];
+        let mut h = MultiplayHost::new(me, "rs", 2, 7, 8);
+        h.on_assoc(1, ds);
+        h.clients.get_mut(&1).unwrap().stage = Stage::Joined;
+        h.put_message(&[0x11; 400], 0, Some("bot A".into()));   // 1 grant + 3 fragments
+        h.put_message(&[0x22; 400], 0, Some("bot B".into()));
+        let (first, _) = h.pop_item(0.0).unwrap();                // bot A has started
+        assert_eq!(first.port, 0xD);
+        // the DS asks for the token and starts sending
+        let mut req = vec![0u8, 0, 0x14, 0, 1, 0, 0xff, 0xff];
+        req.extend_from_slice(&800u32.to_le_bytes());
+        req.extend_from_slice(&[0u8; 4]);
+        req.extend_from_slice(&0x1234u32.to_le_bytes());
+        h.on_reply(1, 0xD, &req, 0.1);
+        let frs = fragments(1, &[0x33; 300], 0);
+        h.on_reply(1, 0xE, &frs[0], 0.2);
+        // the rest of bot A first (3 fragments), then the DS's grant and first echo, then wait for its next fragment
+        let ports: Vec<u8> = (0..3).map(|_| h.pop_item(0.3).unwrap().0.port).collect();
+        assert_eq!(ports, vec![0xE, 0xE, 0xE]);
+        let (g, _) = h.pop_item(0.3).unwrap();
+        assert_eq!((g.port, g.payload[0], g.payload[4]), (0xD, 1, 1)); // grant for id 1
+        let (e, _) = h.pop_item(0.3).unwrap();
+        assert_eq!(e.payload, frs[0]);
+        assert!(h.pop_item(0.4).is_none()); // bot B must not start inside the DS's message
+        h.on_reply(1, 0xE, &frs[1], 0.5);
+        assert_eq!(h.pop_item(0.5).unwrap().0.payload, frs[1]); // last fragment: the DS unit is closed
+        let (b, _) = h.pop_item(0.6).unwrap();
+        assert_eq!(b.port, 0xD); // now bot B
+        let mut last = None;
+        while let Some((_, l)) = h.pop_item(0.7) {
+            if l.is_some() {
+                last = l;
+            }
+        }
+        assert_eq!(last.unwrap().0, "bot B");
     }
 
     #[test]
@@ -704,8 +844,8 @@ mod tests {
         hello.extend_from_slice(&[0u8; 100]);
         h.on_reply(1, 0xC, &hello, 0.0);
         assert_eq!(h.clients[&1].stage, Stage::Hello);
-        assert_eq!(h.queue[0].port, 0xC);
-        assert_eq!(h.queue[0].repeats, 9);
-        assert_eq!(&h.queue[0].payload[..2], &[4, 0]);
+        assert_eq!(h.queue[0].items[0].port, 0xC);
+        assert_eq!(h.queue[0].items[0].repeats, 9);
+        assert_eq!(&h.queue[0].items[0].payload[..2], &[4, 0]);
     }
 }

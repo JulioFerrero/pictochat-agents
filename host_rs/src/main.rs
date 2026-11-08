@@ -24,7 +24,10 @@ pub enum Event {
     Gui(Value),
 }
 
-const MP_OUTSTANDING: u32 = 100; // packets queued on the ESP32 at most (it holds 128)
+// packets queued on the ESP32 at most (it holds 128). Kept small so a DS's message can still go ahead of a host
+// message that has not started (packets already on the ESP32 cannot be reordered); 24 packets are at least
+// 24 polls (170 ms at 7 ms), several 50-ms 'M' reports, so the ESP32 does not run dry.
+const MP_OUTSTANDING: u32 = 24;
 const USAGE: &str = "usage: pictochat-host [options]
   --serial TTY          ESP32-C3 modem with the offload firmware (default /dev/ttyACM0)
   --channel N           Wi-Fi channel (default 1)
@@ -155,6 +158,7 @@ struct Host {
     rx_seen: HashMap<(u8, Vec<u8>), f64>,
     ptype_seen: HashSet<(u8, i32)>,
     mp: Option<MpStats>,
+    deliveries: Vec<(u16, String, f64)>, // (packet count since the last clear that marks the end, label, time queued)
     tx_errors: u32,
     beacons: u32,
     logged: u32,
@@ -233,15 +237,40 @@ impl Host {
 
     /// Hand queued packets to the ESP32, which repeats each one on its polls until the DS confirmed it.
     fn feed(&mut self) {
-        while !self.ml.queue.is_empty() && self.outstanding() < MP_OUTSTANDING {
-            let it = self.ml.queue.pop_front().unwrap();
+        while self.outstanding() < MP_OUTSTANDING {
+            let now = self.now();
+            let Some((it, label)) = self.ml.pop_item(now) else { break };
             let min_sent = if self.a.confirm { it.min_sent } else { it.repeats };
             if let Err(e) = self.modem.mp_push(it.port, &it.payload, min_sent, it.repeats) {
                 self.emit(&format!("# modem write error: {}", e));
             }
             let ptype = if it.payload.len() >= 2 { u16::from_le_bytes([it.payload[0], it.payload[1]]) as i64 } else { -1 };
             self.gui(json!({"kind": "tx", "port": it.port, "ptype": ptype, "hex": hex(&it.payload), "repeats": 0}));
+            if let Some((desc, t)) = label {
+                self.deliveries.push((self.modem.pushed, desc, t));
+            }
         }
+    }
+
+    /// Log host messages whose last packet the ESP32 has finished (sent and confirmed, or sent the maximum).
+    fn check_deliveries(&mut self) {
+        let Some(m) = self.mp else { return };
+        if m.epoch != self.modem.epoch || self.deliveries.is_empty() {
+            return;
+        }
+        let finished = m.queued.wrapping_sub(m.qlen);
+        let now = self.now();
+        let (done, wait): (Vec<_>, Vec<_>) =
+            self.deliveries.drain(..).partition(|(end, _, _)| finished.wrapping_sub(*end) as i16 >= 0);
+        self.deliveries = wait;
+        for (_, desc, t) in done {
+            self.emit(&format!("# delivered: {} {:.2} s after it was queued", desc, now - t));
+        }
+    }
+
+    fn clear_modem_queue(&mut self) {
+        let _ = self.modem.mp_clear();
+        self.deliveries.clear();
     }
 
     fn mp_config(&mut self) {
@@ -259,10 +288,10 @@ impl Host {
         let aids = self.aids.iter().map(|(k, v)| format!("{}={}", mac_str(k), v)).collect::<Vec<_>>();
         let line = format!(
             "# status: {} beacons sent, counter={}, interval={}TU, stations heard: {}, frames logged: {}, aids: {}, \
-             CMD sent {}, replies heard {}, ACK sent {}, queued on the ESP32 {}, ESP32 TX errors {}",
+             CMD sent {}, replies heard {}, ACK sent {}, queued on the ESP32 {} (+{} here), ESP32 TX errors {}",
             self.beacons, self.st.counter, self.st.interval,
             if stations.is_empty() { "none".into() } else { stations.join(", ") }, self.logged,
-            if aids.is_empty() { "none".into() } else { aids.join(", ") }, m.polls, m.replies, m.acks, m.qlen, m.txerr);
+            if aids.is_empty() { "none".into() } else { aids.join(", ") }, m.polls, m.replies, m.acks, m.qlen, self.ml.queued_packets(), m.txerr);
         self.emit(&line);
         let aid_map: serde_json::Map<String, Value> = self.aids.iter().map(|(k, v)| (mac_str(k), json!(v))).collect();
         self.gui(json!({"kind": "state", "aids": aid_map, "cmd": m.polls, "replies": m.replies,
@@ -290,7 +319,7 @@ impl Host {
                 let name = c.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
                     .map(|s| s.to_string()).unwrap_or(self.a.name.clone());
                 let pl = member_info_message(0, &self.a.mac, &name, self.a.color);
-                self.ml.put_message(&pl, 0);
+                self.ml.put_message(&pl, 0, None);
                 self.emit("# gui: queued host member message");
                 self.gui(json!({"kind": "message", "id": 0, "hex": hex(&pl), "dir": "tx"}));
             }
@@ -346,7 +375,10 @@ impl Host {
                                        err, err, fc, self.tx_errors));
                 }
             }
-            b'M' => self.mp = MpStats::parse(&p).or(self.mp),
+            b'M' => {
+                self.mp = MpStats::parse(&p).or(self.mp);
+                self.check_deliveries();
+            }
             _ => {}
         }
     }
@@ -405,7 +437,7 @@ impl Host {
                 self.st.members = 1 + self.aids.len() as u8;
                 self.st.on_members_changed();
                 if self.aids.is_empty() {
-                    let _ = self.modem.mp_clear();
+                    self.clear_modem_queue();
                 }
                 self.sync_clients(false);
             }
@@ -437,7 +469,7 @@ impl Host {
                 if self.aids.contains_key(&a2) {
                     self.ml.on_assoc(aid, a2);
                     self.flush_ml_logs();
-                    let _ = self.modem.mp_clear(); // on_assoc dropped the queue: drop the modem's too
+                    self.clear_modem_queue(); // on_assoc dropped the queue: drop the modem's too
                     self.sync_clients(true);
                     self.st.members = 1 + self.aids.len() as u8;
                     self.st.status = 0xBD8A;
@@ -516,7 +548,8 @@ fn run() -> Result<(), String> {
     let freq = if a.channel == 14 { 2484 } else { 2407 + 5 * a.channel as u16 };
     let mut h = Host {
         a, t0: Instant::now(), logf, pcap, gui, modem, st, ml, aids: BTreeMap::new(), stations: BTreeMap::new(),
-        answered: HashSet::new(), rx_seen: HashMap::new(), ptype_seen: HashSet::new(), mp: None, tx_errors: 0,
+        answered: HashSet::new(), rx_seen: HashMap::new(), ptype_seen: HashSet::new(), mp: None,
+        deliveries: Vec::new(), tx_errors: 0,
         beacons: 0, logged: 0, freq,
     };
     let (ch, mac, all) = (h.a.channel, h.a.mac, h.a.all);
@@ -558,7 +591,9 @@ fn run() -> Result<(), String> {
             next_prune = now + Duration::from_secs(5);
         }
         let wait = next_beacon.min(next_status).saturating_duration_since(Instant::now()).min(Duration::from_millis(20));
-        match rx.recv_timeout(wait) {
+        let ev = rx.recv_timeout(wait);
+        h.ml.now = h.now();
+        match ev {
             Ok(Event::Serial(k, p)) => h.on_serial(k, p),
             Ok(Event::Gui(c)) => h.on_gui(c),
             Ok(Event::SerialGone(e)) => {
