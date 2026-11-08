@@ -1,0 +1,14 @@
+[package]
+name = "pictochat-host"
+version = "0.1.0"
+edition = "2021"
+description = "PictoChat room host for a real Nintendo DS, using the ESP32-C3 radio modem with the multiplay offload"
+
+[dependencies]
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

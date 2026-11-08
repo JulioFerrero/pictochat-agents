@@ -1,0 +1,7 @@
+# Raspberry Pi (32-bit Raspberry Pi OS): a static musl binary, linked with Rust's own lld, so no ARM
+# cross-compiler is needed: cargo build --release --target armv7-unknown-linux-musleabihf
+[target.armv7-unknown-linux-musleabihf]
+linker = "rust-lld"
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
