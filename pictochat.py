@@ -1392,6 +1392,8 @@ def host(args):
          "Type a label + Enter for a marker, Ctrl-C to stop." % (mac(src), args.channel, args.room, args.out))
     tr = Tracker()
     stations = {}            # DS MAC -> frame count
+    rssi = {}                # DS MAC -> [last dBm, smoothed dBm, time heard, frames]  (for the bot's /connection)
+    reply_t = [time.time(), -1]   # [time the reply counter last changed, its value]
     answered = set()
     aids = {}                # DS MAC -> AID (1..15)
     mp = Counter()
@@ -1521,8 +1523,11 @@ def host(args):
                         stats["logged"], ", ".join("%s=%d" % (mac(k), v) for k, v in aids.items()) or "none",
                         mp["cmd"], mp["reply"], mp["ack"]))
                 next_status = now + 5
+                if mp["reply"] != reply_t[1]:
+                    reply_t[:] = [now, mp["reply"]]
                 gui("state", aids={mac(k): v for k, v in aids.items()}, cmd=mp["cmd"], replies=mp["reply"], beacons=sent,
-                    echo=bool(args.echo))
+                    echo=bool(args.echo), cycle=args.poll_cycle_joined, reply_age=round(now - reply_t[0], 1),
+                    rssi={mac(k): [v[0], round(v[1], 1), round(now - v[2], 1), v[3]] for k, v in rssi.items()})
             r = [sock] if getattr(sock, 'pending', None) else select.select([sock], [], [], max(0.0, min(0.02, next_t - time.time())))[0]
             if not r:
                 continue
@@ -1539,6 +1544,12 @@ def host(args):
                 if f.cls != "beacon":
                     pcap.write(pcap_record(ts, pkt))   # our own polls/ACKs: keep in the pcap, but no costly text log
                 continue    # our own transmission looped back
+            if f.signal is not None and f.a2 and bytes(f.a2) in aids:   # signal strength of each joined DS
+                r_ = rssi.get(bytes(f.a2))
+                if r_ is None:
+                    rssi[bytes(f.a2)] = [f.signal, float(f.signal), ts, 1]
+                else:
+                    r_[0], r_[1], r_[2], r_[3] = f.signal, r_[1] + 0.2 * (f.signal - r_[1]), ts, r_[3] + 1
             if f.cls == "beacon" and not args.all:
                 if not (has_nintendo_ie(f) and f.a2 and bytes(f.a2) != src):
                     continue
