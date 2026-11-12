@@ -1,6 +1,6 @@
 [package]
 name = "pictochat-host"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "PictoChat room host for a real Nintendo DS, using the ESP32-C3 radio modem with the multiplay offload"
 

@@ -40,6 +40,29 @@ import threading
 import time
 from collections import Counter, defaultdict
 
+__version__ = "0.2.0"
+
+
+def build_commit(script=__file__):
+    """Short git commit of the code that is running: from the checkout the script lives in, or from a file
+    `<script name>.commit` next to it (written when the code is copied to a machine without git). '' if unknown."""
+    here = os.path.dirname(os.path.abspath(script))
+    try:
+        r = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                           timeout=3)
+        # only when this folder is the top of the checkout (not just somewhere below another repository)
+        top = subprocess.run(["git", "-C", here, "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                             timeout=3).stdout.strip()
+        if r.returncode == 0 and top and os.path.realpath(top) == os.path.realpath(here):
+            return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        with open(os.path.splitext(os.path.abspath(script))[0] + ".commit") as fh:
+            return fh.read().split()[0][:12]
+    except (OSError, IndexError):
+        return ""
+
 # ---------------------------------------------------------------------------
 # constants
 
@@ -1397,6 +1420,11 @@ def host(args):
         args._sock, args._offload = sock, offload
         emit("# polling: %s" % ("on the ESP32 every %.1f ms (multiplay offload)" % args.mp_period_ms if offload
                                  else "from this program every %.1f ms" % args.poll_ms))
+    commit = build_commit()
+    radio = ("emulator bridge" if args.bridge else
+             "ESP32-C3 modem, polls on the ESP32" if offload else
+             "ESP32-C3 modem, polls from the host" if args.serial else "Wi-Fi adapter %s" % args.iface)
+    emit("# pictochat.py %s%s, radio: %s" % (__version__, " (commit %s)" % commit if commit else "", radio))
 
     def gui(kind, **kw):
         if bridge:
@@ -1556,7 +1584,9 @@ def host(args):
                 next_status = now + 5
                 if mp["reply"] != reply_t[1]:
                     reply_t[:] = [now, mp["reply"]]
-                gui("state", aids={mac(k): v for k, v in aids.items()}, cmd=mp["cmd"], replies=mp["reply"], beacons=sent,
+                gui("state", version=__version__, commit=commit, impl="python", radio=radio,
+                    uptime=round(now - t0), aids={mac(k): v for k, v in aids.items()}, cmd=mp["cmd"],
+                    replies=mp["reply"], beacons=sent,
                     echo=bool(args.echo), cycle=args.poll_cycle_joined, reply_age=round(now - reply_t[0], 1),
                     rssi={mac(k): [v[0], round(v[1], 1), round(now - v[2], 1), v[3]] for k, v in rssi.items()})
             r = [sock] if getattr(sock, 'pending', None) else select.select([sock], [], [], max(0.0, min(0.02, next_t - time.time())))[0]

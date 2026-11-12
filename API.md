@@ -58,7 +58,7 @@ Every event has `kind` and `t`, which is the seconds since the host started.
 | `kind` | Fields | Meaning |
 |---|---|---|
 | `message` | `id`, `hex`, `dir` | A **complete message**. `dir` is `"rx"` when it came from a DS (`id` is the DS's AID) and `"tx"` when the host sent it (`id` is 0). `hex` is the whole message (section 7 of `PROTOCOL.md`). |
-| `state` | `aids`, `cmd`, `replies`, `beacons`, `cycle`, `reply_age`, `rssi` | Sent every 5 s. `aids` maps the MAC of each associated DS to its AID. `rssi` maps a MAC to `[last dBm, smoothed dBm, seconds since heard, frames]`. `reply_age` is the seconds since any DS last answered a poll. |
+| `state` | `version`, `commit`, `impl`, `radio`, `uptime`, `aids`, `cmd`, `replies`, `beacons`, `cycle`, `reply_age`, `rssi` | Sent every 5 s. `version` is the host's version, `commit` the short git commit of the running code (empty if unknown), `impl` is `python` or `rust`, `radio` describes the radio in words and `uptime` is the seconds since the host started. `aids` maps the MAC of each associated DS to its AID. `rssi` maps a MAC to `[last dBm, smoothed dBm, seconds since heard, frames]`. `reply_age` is the seconds since any DS last answered a poll. |
 | `rx` | `port`, `ptype`, `hex`, `mac` | One port packet from a DS (low level). |
 | `tx` | `port`, `ptype`, `hex`, `repeats` | One port packet the host sent (low level). |
 | `log` | `text` | A host log line, such as `# client 1 joined` or `# gui: ...`. |

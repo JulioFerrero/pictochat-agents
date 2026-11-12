@@ -304,7 +304,10 @@ impl Host {
             if aids.is_empty() { "none".into() } else { aids.join(", ") }, m.polls, m.replies, m.acks, m.qlen, self.ml.queued_packets(), m.txerr);
         self.emit(&line);
         let aid_map: serde_json::Map<String, Value> = self.aids.iter().map(|(k, v)| (mac_str(k), json!(v))).collect();
-        self.gui(json!({"kind": "state", "aids": aid_map, "cmd": m.polls, "replies": m.replies,
+        self.gui(json!({"kind": "state", "version": env!("CARGO_PKG_VERSION"),
+                        "commit": option_env!("PICTOCHAT_COMMIT").unwrap_or(""), "impl": "rust",
+                        "radio": "ESP32-C3 modem, polls on the ESP32", "uptime": self.t0.elapsed().as_secs(),
+                        "aids": aid_map, "cmd": m.polls, "replies": m.replies,
                         "beacons": self.beacons, "echo": false}));
     }
 
