@@ -1,4 +1,4 @@
-# PictoChat host for a real Nintendo DS
+# PictoChat host for  Nintendo DS
 
 Host a PictoChat room from a PC (or a Raspberry Pi). A real DS lists the room, joins it and shows the text, drawings
 and dithered pictures you send. Messages drawn on the DS come back to the PC.
