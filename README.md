@@ -65,6 +65,12 @@ sudo .venv/bin/python pictochat.py host --iface <wifi-interface> --channel 1 --g
   `sudo usermod -aG dialout $USER` once, then log out and back in.
 - **What success looks like:** the host prints a status line every 5 s. When a DS joins, the log shows
   `# client 1 hello` and then `# client 1 joined`.
+- **No radio yet?** `python3 pictochat.py selftest` checks the frame builders without any hardware and should end
+  with `selftest OK`.
+- **No git** (Raspberry Pi OS Lite ships without it)? Either `sudo apt install git`, or fetch the code with
+  `curl -L https://github.com/LNYmachines/pictochat-host/archive/refs/heads/main.tar.gz | tar xz`.
+- **Headless machine** (a Pi over ssh): `pictochat_gui.py` needs a display. Send from the command line instead with
+  `.venv/bin/python emu/sendchat.py 7777 "text"`, or run a bot such as `examples/echo_bot.py`.
 
 On the DS, open PictoChat and choose Chat Room A. Then, in the window:
 - **Send text** types a message.
@@ -183,10 +189,14 @@ each other or to our host through a TCP bridge.
   - `python3 viewer.py 2` opens a live window; click the lower screen to tap it.
 - **A full bridged session:** `FPS=60 ./exp.sh TAG --lockstep` starts one emulated DS and the host, joins room A and
   reports the join and the emulation speed. `./run_bridge.sh TAG [host args]` does the same without the report.
-  The host's GUI port is 7790, so `python3 sendchat.py 7790 "text"` sends text, and
-  `../.venv/bin/python ../examples/echo_bot.py 7790` runs the example bot.
-- **Draw and send on the emulated DS:** `./ctl.sh "drag 0 60 30 200 70 30"` draws a line, and
-  `./ctl.sh "touch 0 238 116 8"` presses SEND.
+  The host's GUI port is 7790, so `../.venv/bin/python sendchat.py 7790 "text"` sends text, and
+  `../.venv/bin/python ../examples/echo_bot.py 7790` runs the example bot. Both need Pillow, so use the venv.
+  The live host log is `TAG.log`. To run a second checkout at the same time, give it its own ports:
+  `BRIDGE_PORT=7878 GUI_PORT=7890 ./exp.sh TAG --lockstep`.
+- **Draw and send on the emulated DS:** `./ctl.sh "drag 0 100 45 200 80 30"` draws a line, and
+  `./ctl.sh "touch 0 238 116 8"` presses SEND. A stroke must start below the nickname tab in the top-left corner of
+  the drawing area, or PictoChat ignores it. The host log then shows `DS message complete`; at emulator speed this
+  can take half a minute.
 - **Stop everything:** `./stop.sh`. It stops only the harness and host that these scripts started.
 - **Analysis:** `flow.py PCAP t0 t1 [--no-fcs]` prints a compressed packet flow, and `early.py PCAP N` lists the frames
   after association.
@@ -199,6 +209,10 @@ each other or to our host through a TCP bridge.
 ## Running on the real DS
 
 - After a host restart, a DS that is still in the room sends a few deauths, then rejoins within about 2 s.
+- If the host was away for longer, the DS opens the room itself and stays there alone. Leave the room on the DS and
+  enter it again to get back to the host.
+- Only one host can use a modem. A second one on the same serial port is refused. If the host runs as a service,
+  stop the service before starting another host by hand.
 - If the DS drops out, try `--poll-ms 10` or `--no-confirm`. A frozen DS needs a power cycle.
 - Logs: `host_log.log` and `host_log.pcap`. Wireshark opens the pcap, and `pictochat.py analyze` decodes it. Captures
   contain the real MAC addresses of your devices, so think twice before publishing them.

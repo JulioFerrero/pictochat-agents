@@ -37,6 +37,10 @@ fn make_raw(f: &File) -> std::io::Result<()> {
 
 pub fn open(path: &str, tx: Sender<Event>) -> std::io::Result<Modem> {
     let f = OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOCTTY).open(path)?;
+    // one host per modem: a second program on the same port would steal bytes from this one
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "the port is in use by another host"));
+    }
     make_raw(&f)?;
     let r = f.try_clone()?;
     std::thread::spawn(move || reader(r, tx));

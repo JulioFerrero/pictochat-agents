@@ -8,6 +8,11 @@ set -e
 cd "$(dirname "$0")"
 ZIP=${1:-"$HOME/Downloads/NDS BIOS & Firmware.zip"}
 COMMIT=497aa6cdd26f45f8064b78916b00a773eab4ded7
+if [ ! -f fw/firmware.bin ] && [ ! -f "$ZIP" ]; then
+    echo "no BIOS/firmware: copy bios7.bin, bios9.bin and firmware.bin into emu/fw/, or pass a zip that contains them:"
+    echo "  ./build.sh path/to/zip      (looked for: $ZIP)"
+    exit 1
+fi
 if [ ! -d melonDS ]; then
     git clone https://github.com/melonDS-emu/melonDS.git
     git -C melonDS checkout -q $COMMIT

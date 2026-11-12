@@ -31,6 +31,7 @@ import json
 import os
 import queue
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -973,7 +974,11 @@ class BridgeSock:
     RT = bytes([0, 0, 8, 0, 0, 0, 0, 0])
 
     def __init__(self, port, channel, host_mac=bytes(6)):
-        self.s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            self.s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        except OSError as e:
+            sys.exit("cannot reach the emulator bridge on 127.0.0.1:%d: %s\nStart the harness first: "
+                     "emu/start.sh OUT.pcap 1 %d (or use emu/run_bridge.sh)." % (port, e, port))
         self.s.settimeout(None)
         self.channel = channel
         self.host_mac = bytes(host_mac)
@@ -1055,10 +1060,11 @@ class SerialSock:
         except ImportError:
             sys.exit("--serial needs pyserial: .venv/bin/pip install -r requirements.txt, then run with .venv/bin/python")
         try:
-            self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=1)
+            self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=1, exclusive=True)
         except serial.SerialException as e:
-            sys.exit("cannot open %s: %s\nIs the ESP32-C3 plugged in (ls /dev/ttyACM*)? Without root your user must be in "
-                     "the dialout group (sudo usermod -aG dialout $USER, then log in again)." % (port, e))
+            sys.exit("cannot open %s: %s\nIs the ESP32-C3 plugged in (ls /dev/ttyACM*)? Is another host already using "
+                     "the port? Without root your user must be in the dialout group (sudo usermod -aG dialout $USER, "
+                     "then log in again)." % (port, e))
         self.channel = channel
         self.freq = 2484 if channel == 14 else 2407 + 5 * channel
         self.emit = emit
@@ -1282,7 +1288,7 @@ def host_reply(src, f, st, aid=1):
 
 def handle_gui_cmd(c, args, ml, src, emit, gui):
     """Commands from pictochat_gui.py."""
-    cmd = c.get("cmd")
+    cmd = c.get("cmd") if isinstance(c, dict) else None
     try:
         if cmd == "raw":        # {"cmd":"raw","port":14,"hex":"...","repeats":6}: payload on a port
             port, pl = int(c["port"]), bytes.fromhex(c["hex"])
@@ -1299,7 +1305,11 @@ def handle_gui_cmd(c, args, ml, src, emit, gui):
             ml.name = args.name = name
             emit("# gui: host nickname is now %r (shown to DSes that join from now on)" % name)
         elif cmd == "chat":     # {"cmd":"chat","pixels":[[...]*256]*80} palette indices
-            msg = ml.send_chat(bitmap_to_image(c["pixels"]))
+            px = c["pixels"]
+            if not (isinstance(px, list) and len(px) == 80
+                    and all(isinstance(r, list) and len(r) == 256 for r in px)):
+                raise ValueError("pixels must be 80 rows of 256 palette indices")
+            msg = ml.send_chat(bitmap_to_image(px))
             gui("message", id=0, hex=msg.hex(), dir="tx")
         elif cmd == "mp_period":  # {"cmd":"mp_period","ms":5}: change the ESP32 poll interval while running (--offload)
             sock = getattr(args, "_sock", None)
@@ -1316,8 +1326,9 @@ def handle_gui_cmd(c, args, ml, src, emit, gui):
             emit("# gui: %s is not available from the command line yet; use chat with pixels" % cmd)
         else:
             emit("# gui: unknown command %r" % (c,))
-    except (KeyError, ValueError) as e:
-        emit("# gui: bad command %r: %s" % (c, e))
+    except (KeyError, ValueError, TypeError, IndexError, AttributeError) as e:
+        # a client must never be able to stop the host: report the command and carry on
+        emit("# gui: bad command %s: %s: %s" % (repr(c)[:120], type(e).__name__, e))
 
 
 def host(args):
@@ -1369,9 +1380,15 @@ def host(args):
             bridge.send({"kind": "log", "t": time.time() - t0, "text": msg})
 
     offload = False
+    mp_base = None
     if isinstance(sock, SerialSock):
         sock.emit = emit
         offload = sock.mp and args.offload and not args.no_poll
+        if sock.mp:
+            # The modem keeps its client list and packet queue across host runs (USB does not reset it). Start clean,
+            # or a DS that rejoins under its old AID is not treated as new and never gets the opening poll.
+            sock.mp_clients({})
+            sock.mp_clear()
         if offload:
             sock.mp_config(True, args.clienttime, args.cmd_word, args.cmdcount, args.mp_period_ms * 1000,
                            args.reply_wait * 1000, args.poll_cycle)
@@ -1424,6 +1441,10 @@ def host(args):
     sent = 0
     next_t = t0
     next_status = t0 + 5
+
+    def on_sigterm(*_):                 # systemd stop / kill: leave through the same clean-up as Ctrl-C
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_sigterm)
     try:
         while total is None or sent < total:
             now = time.time()
@@ -1521,8 +1542,11 @@ def host(args):
                         ml.confirm()                            # every addressed client got that packet
                 ack_deadline = None
             if offload and sock.mpstats:
-                mp["cmd"], mp["ack"] = sock.mpstats["polls"], sock.mpstats["acks"]
-                mp["reply"] = sock.mpstats["replies"]
+                if mp_base is None:             # the modem counts since its power-up: show this run only
+                    mp_base = dict(sock.mpstats)
+                mp["cmd"] = max(0, sock.mpstats["polls"] - mp_base["polls"])
+                mp["ack"] = max(0, sock.mpstats["acks"] - mp_base["acks"])
+                mp["reply"] = max(0, sock.mpstats["replies"] - mp_base["replies"])
             if now >= next_status:
                 emit("# status: %d beacons sent, counter=%d, interval=%dTU, stations heard: %s, frames logged: %d, "
                      "aids: %s, CMD sent %d, replies heard %d, ACK sent %d"
@@ -1655,6 +1679,13 @@ def host(args):
     except KeyboardInterrupt:
         pass
     finally:
+        if isinstance(sock, SerialSock) and sock.mp:
+            try:                        # leave the modem idle: no clients, no polling
+                sock.mp_clients({})
+                sock.mp_clear()
+                sock.mp_config(False, args.clienttime, args.cmd_word, args.cmdcount, 0, 0, 1)
+            except Exception:
+                pass
         emit("# sent %d beacons, saw %d frames, logged %d" % (sent, stats["seen"], stats["logged"]))
         emit("# logged by class: " + (", ".join("%s=%d" % (k, v) for k, v in sorted(stats.items()) if k not in ("seen", "logged")) or "none"))
         emit(tr.summary())

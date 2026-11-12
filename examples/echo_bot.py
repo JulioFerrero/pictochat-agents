@@ -14,7 +14,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import pictochat_gui as gui     # noqa: E402  (picture helpers: decode_image, text_to_pixels, clip)
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 7777
-sock = socket.create_connection(("127.0.0.1", port))
+if gui.text_to_pixels("x") is None:
+    sys.exit("text rendering needs Pillow: run this with the venv (.venv/bin/python examples/echo_bot.py)")
+try:
+    sock = socket.create_connection(("127.0.0.1", port))
+except OSError as e:
+    sys.exit("no host on 127.0.0.1:%d (%s): start it with --gui-port %d" % (port, e, port))
 started = time.time()
 names = {}                      # AID -> nickname, from the DSes' member messages
 

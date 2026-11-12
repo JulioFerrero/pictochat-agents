@@ -3,7 +3,8 @@
 export LC_ALL=C
 cd "$(dirname "$0")"
 TAG=$1; shift
-./run_bridge.sh "$TAG" --gui-port 7790 "$@"
+echo "starting the emulator and the host, waiting for the join (about 45 s; live log: emu/$TAG.log) ..."
+./run_bridge.sh "$TAG" --gui-port ${GUI_PORT:-7790} "$@"
 for i in $(seq 1 40); do sleep 2; grep -aq "joined" $TAG.log 2>/dev/null && break; done
 if ! grep -aq "joined" $TAG.log; then echo "$TAG fps=${FPS:-60}: no join within 80 s"; exit; fi
 f0=$(./ctl.sh frames; sleep 0.5; tail -1 harness.out | awk '{print $4}'); t0=$(date +%s.%N)

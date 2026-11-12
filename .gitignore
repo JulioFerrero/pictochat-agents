@@ -19,6 +19,7 @@ esp32c3_modem/dependencies.lock
 emu/melonDS/
 emu/fw/
 emu/harness
+emu/*.err
 emu/romrun
 emu/cmd.fifo
 emu/fw_inst*.bin
