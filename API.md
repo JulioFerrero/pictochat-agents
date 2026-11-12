@@ -76,8 +76,8 @@ Every event has `kind` and `t`, which is the seconds since the host started.
 back. It is about 40 lines of standard-library code plus `pictochat_gui.py`.
 
 ```
-sudo python3 pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777
-python3 examples/echo_bot.py 7777
+sudo .venv/bin/python pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777
+.venv/bin/python examples/echo_bot.py 7777
 ```
 
 Any language that can open a TCP socket and read JSON works the same way.

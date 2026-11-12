@@ -29,5 +29,6 @@ emu/*.png
 emu/*.log
 emu/*.out
 emu/live*.ppm*
+emu/*.pid
 emu/sd*.img*
 emu/sdtest/

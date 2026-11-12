@@ -45,17 +45,26 @@ flowchart LR
 
 ## Quick start
 
+You need Python 3 with `venv` and Tk. On Debian, Ubuntu or Mint: `sudo apt install python3-venv python3-tk`.
+
 ```
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # Pillow and pyserial (both optional)
+git clone https://github.com/LNYmachines/pictochat-host.git && cd pictochat-host
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # Pillow and pyserial
 
-# with a monitor-mode adapter (root is needed for the radio):
-sudo python3 pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777
+# EITHER with a monitor-mode adapter: find its name with `iw dev` (e.g. wlx…); root is needed for the radio
+sudo .venv/bin/python pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777
 
-# or with the ESP32-C3 modem:
-python3 pictochat.py host --serial /dev/ttyACM0 --offload --channel 1 --gui-port 7777
+# OR with the ESP32-C3 modem (flash it first, see esp32c3_modem/ below)
+.venv/bin/python pictochat.py host --serial /dev/ttyACM0 --offload --channel 1 --gui-port 7777
 
-python3 pictochat_gui.py          # as your normal user
+# then, in a second terminal, as your normal user:
+.venv/bin/python pictochat_gui.py
 ```
+
+- **ESP32 serial port:** opening `/dev/ttyACM0` without root needs the `dialout` group. Run
+  `sudo usermod -aG dialout $USER` once, then log out and back in.
+- **What success looks like:** the host prints a status line every 5 s. When a DS joins, the log shows
+  `# client 1 hello` and then `# client 1 joined`.
 
 On the DS, open PictoChat and choose Chat Room A. Then, in the window:
 - **Send text** types a message.
@@ -100,11 +109,19 @@ On the DS, open PictoChat and choose Chat Room A. Then, in the window:
 
 ### `esp32c3_modem/` (ESP-IDF 5.4)
 
+You need ESP-IDF 5.4. Install it with Espressif's
+[Linux setup guide](https://docs.espressif.com/projects/esp-idf/en/v5.4.1/esp32c3/get-started/linux-macos-setup.html)
+(`git clone -b v5.4.1 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf`, then
+`~/esp/esp-idf/install.sh esp32c3`). Then, in every new terminal:
+
 ```
+. ~/esp/esp-idf/export.sh            # puts idf.py on the PATH
 cd esp32c3_modem
-idf.py set-target esp32c3
+idf.py set-target esp32c3            # once
 idf.py build flash -p /dev/ttyACM0
 ```
+
+A board that doesn't flash may need download mode: hold BOOT, press RESET, then release BOOT.
 
 - The modem moves raw frames between USB and the air. It sends at a fixed 2 Mbit/s with the long preamble, and it
   receives in promiscuous mode with an on-chip filter. Its station MAC is set to the host MAC, so the hardware ACKs the
@@ -132,8 +149,11 @@ idf.py build flash -p /dev/ttyACM0
   builders, which a unit test checks.
 - It assembles a message only once every byte has arrived.
 - On a Pi Zero 2 W with a DS in the room it uses 0.5 % CPU and 1 MB RAM. The Python host uses 1.7 % and 15 MB.
-- Build: `cargo build --release`. For 32-bit Raspberry Pi OS without an ARM cross-compiler, use
-  `cargo build --release --target armv7-unknown-linux-musleabihf`, which links statically against musl using rust-lld.
+- You need Rust: install it with [rustup](https://rustup.rs).
+- Build: `cd host_rs && cargo build --release`. The binary is `target/release/pictochat-host`.
+- For 32-bit Raspberry Pi OS without an ARM cross-compiler, run `rustup target add armv7-unknown-linux-musleabihf`
+  once, then `cargo build --release --target armv7-unknown-linux-musleabihf`. This links statically against musl
+  using rust-lld. Copy `target/armv7-unknown-linux-musleabihf/release/pictochat-host` to the Pi.
 - Options: `pictochat-host --help`.
 
 ### `emu/`: two-DS emulator test bed
@@ -141,20 +161,33 @@ idf.py build flash -p /dev/ttyACM0
 This is the safe place to try protocol changes. It runs two emulated DS Lites on the real firmware, either talking to
 each other or to our host through a TCP bridge.
 
-- `./build.sh ["path/NDS BIOS & Firmware.zip"]` clones melonDS at commit `497aa6cd`, then builds its core and our
-  harness. It unpacks `bios7.bin`, `bios9.bin` and `firmware.bin` into `emu/fw/`. **You need your own dumps**: they are
-  Nintendo's copyrighted code and are not included.
+- **Build tools:** git, cmake, g++ and unzip. On Debian, Ubuntu or Mint: `sudo apt install git cmake g++ unzip`.
+- **BIOS and firmware:** you need your own dumps of `bios7.bin`, `bios9.bin` and `firmware.bin` from a DS Lite. They
+  are Nintendo's copyrighted code and are not included. Either copy the three files into `emu/fw/`, or pass a zip that
+  contains them to `build.sh`.
+- `cd emu && ./build.sh ["path/to/zip"]` clones melonDS at commit `497aa6cd`, then builds its core, the harness and
+  `romrun`. It takes a few minutes.
 - `./start.sh OUT.pcap 2` runs two DSes that chat with each other, which gives reference traffic.
   `./start.sh OUT.pcap 1 7778` runs one DS whose host side is a bridge for
   `pictochat.py host --bridge 7778 --lockstep`.
-- **First run:** tap the screen, then run `./wizard.sh`. It completes the DS setup wizard on both DSes.
+- **First run:**
+  1. Run `./start.sh first.pcap 2`.
+  2. Tap the screens with `./ctl.sh "touch 0 5 5 6" "touch 1 5 5 6"`.
+  3. If the DSes show the setup wizard (a firmware without user settings), run `./wizard.sh`. It completes the wizard
+     on both DSes.
+  4. Check with `./shot.sh 0 menu`, which writes `menu.png`. The DS menu should show PictoChat.
 - **Controlling the emulator:**
   - `./ctl.sh "cmd"` accepts `touch I X Y [frames]`, `drag`, `key I MASK frames`, `shot I file.ppm`, `reset I`,
     `fps N`, `fast on|off` and `quit`.
   - `./shot.sh I name` saves a PNG screenshot.
   - `python3 viewer.py 2` opens a live window; click the lower screen to tap it.
-- **A full bridged session:** `./run_bridge.sh TAG [host args]`, or `FPS=60 ./exp.sh TAG --lockstep`, which reports the
-  join and the emulation speed. `python3 sendchat.py 7790 "text"` sends text through the host's GUI port.
+- **A full bridged session:** `FPS=60 ./exp.sh TAG --lockstep` starts one emulated DS and the host, joins room A and
+  reports the join and the emulation speed. `./run_bridge.sh TAG [host args]` does the same without the report.
+  The host's GUI port is 7790, so `python3 sendchat.py 7790 "text"` sends text, and
+  `../.venv/bin/python ../examples/echo_bot.py 7790` runs the example bot.
+- **Draw and send on the emulated DS:** `./ctl.sh "drag 0 60 30 200 70 30"` draws a line, and
+  `./ctl.sh "touch 0 238 116 8"` presses SEND.
+- **Stop everything:** `./stop.sh`. It stops only the harness and host that these scripts started.
 - **Analysis:** `flow.py PCAP t0 t1 [--no-fcs]` prints a compressed packet flow, and `early.py PCAP N` lists the frames
   after association.
 - **Pitfalls:**

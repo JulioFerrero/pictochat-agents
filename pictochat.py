@@ -1050,8 +1050,15 @@ class SerialSock:
     PHY_2M_LONG = 1
 
     def __init__(self, port, channel, host_mac, forward_all=False, emit=print):
-        import serial  # pyserial
-        self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=1)
+        try:
+            import serial  # pyserial
+        except ImportError:
+            sys.exit("--serial needs pyserial: .venv/bin/pip install -r requirements.txt, then run with .venv/bin/python")
+        try:
+            self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=1)
+        except serial.SerialException as e:
+            sys.exit("cannot open %s: %s\nIs the ESP32-C3 plugged in (ls /dev/ttyACM*)? Without root your user must be in "
+                     "the dialout group (sudo usermod -aG dialout $USER, then log in again)." % (port, e))
         self.channel = channel
         self.freq = 2484 if channel == 14 else 2407 + 5 * channel
         self.emit = emit
