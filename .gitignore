@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+.venv/
+
+# host logs (overwritten on every run) and captures: they contain real device MAC addresses
+host_log.log
+host_log.pcap
+captures/
+*.pcap
+*.pcap.gz
+
+# ESP32-C3 modem build output
+esp32c3_modem/build/
+esp32c3_modem/sdkconfig
+esp32c3_modem/sdkconfig.old
+esp32c3_modem/dependencies.lock
+
+# emulator: melonDS checkout, build and runtime state; BIOS/firmware dumps are Nintendo's and stay local
+emu/melonDS/
+emu/fw/
+emu/harness
+emu/romrun
+emu/cmd.fifo
+emu/fw_inst*.bin
+emu/rtc_inst*.bin
+emu/*.ppm
+emu/*.part
+emu/*.png
+emu/*.log
+emu/*.out
+emu/live*.ppm*
+emu/sd*.img*
+emu/sdtest/

@@ -1,6 +1,6 @@
 //! pictochat-host: PictoChat room host for a real Nintendo DS, using the ESP32-C3 radio modem (esp32c3_modem/)
 //! with the multiplay offload: the modem runs the poll / reply / ACK cycle, this program the PictoChat logic
-//! (beacon, auth/assoc, join handshake, messages) and the JSON-lines link for pictochat_gui.py / pictochat_bot.py.
+//! (beacon, auth/assoc, join handshake, messages) and the JSON-lines link for pictochat_gui.py and other clients (e.g. a chatbot).
 //! A port of `pictochat.py host --serial TTY --offload`; pictochat.py remains for monitor-mode adapters.
 
 mod gui;
@@ -37,7 +37,7 @@ const USAGE: &str = "usage: pictochat-host [options]
   --room N              room index for the beacon: 0-3 = Chat Room A-D (default 0)
   --name NAME           host nickname in the room, max 10 characters (default py)
   --color N             host favourite colour 0-15 (default 2)
-  --gui-port PORT       JSON-lines port on 127.0.0.1 for pictochat_gui.py / pictochat_bot.py (0 = off; default 0)
+  --gui-port PORT       JSON-lines port on 127.0.0.1 for pictochat_gui.py and other clients (0 = off; default 0)
   --out BASE            log and pcap file names BASE.log / BASE.pcap (default host_log)
   --no-pcap             do not write the pcap
   --mp-period-ms MS     interval between polls on the ESP32 (default 7)
@@ -403,7 +403,7 @@ impl Host {
         }
     }
 
-    /// A DS left (deauth/disassoc) or went silent. The log line is the one pictochat_bot.py watches for.
+    /// A DS left (deauth/disassoc) or went silent. Clients (e.g. a chatbot) watch for this log line.
     fn remove_client(&mut self, mac: &Mac, reason: &str) {
         let Some(aid) = self.aids.remove(mac) else { return };
         self.last_reply.remove(&aid);

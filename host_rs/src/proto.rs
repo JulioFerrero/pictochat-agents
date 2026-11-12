@@ -1,5 +1,5 @@
 //! 802.11 frames, the PictoChat beacon and the multiplay (WM port 0xC/0xD/0xE) side of a PictoChat host.
-//! A port of the corresponding parts of pictochat.py; pictochat.md documents the protocol.
+//! A port of the corresponding parts of pictochat.py; PROTOCOL.md documents the protocol.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 

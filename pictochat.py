@@ -5,7 +5,7 @@ pictochat.py - a PictoChat room host for a real Nintendo DS, plus capture/decode
 Acts as the host (parent) of a PictoChat room using a monitor-mode Wi-Fi adapter with frame injection (developed with
 the Nintendo Wi-Fi USB Connector, Ralink RT2570 / rt2500usb). A DS lists the room, joins it, and messages typed or
 drawn in pictochat_gui.py are shown on the DS. No third-party dependencies (the GUI uses Pillow for text, optional).
-The protocol is documented in pictochat.md.
+The protocol is documented in PROTOCOL.md.
 
   sudo python3 pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777   # the room
   python3 pictochat_gui.py                                                         # window: send text / drawings
@@ -592,7 +592,7 @@ def analyze(args):
 # ---------------------------------------------------------------------------
 # host beacon (fake PictoChat room)
 #
-# Layout copied from a real DS Lite beacon (capture of a real room) and the firmware (see pictochat.md, 5 and 5a).
+# Layout copied from a real DS Lite beacon (capture of a real room) and the firmware (see PROTOCOL.md, section 3).
 
 LCG_A, LCG_C = 0x5EEDF715, 0x1B0CB173   # arm9 fn 0x0236B24C / 0x0236B1AC
 BEACON_UPDATE_EVERY = 25                # beacons per counter step (about 2.5 s on a real DS)
@@ -686,7 +686,7 @@ def build_cmd(src, seq, clienttime, mask, word=0, data=b""):
 
 
 def build_hostpkt(ptype, value, key, frameno, body_len=108):
-    """Port 0xC handshake packet, shaped like the DS's own type-6 hello (see pictochat.md 5b, 5c).
+    """Port 0xC handshake packet, shaped like the DS's own type-6 hello (see PROTOCOL.md, sections 4 and 6).
 
     Returns (word, data): `word` is the third CMD body word (the DS reply starts with 0x8c34 in the same place),
     `data` is the rest. Whole body: 0-1 word 0x8c34, 2-3 type, 4-5 length (0x68), 6-9 LCG random, 10-105 the 0x60
@@ -738,7 +738,7 @@ def type1_payload(cid, length, rand):
 
 
 def host_join_message(src, name, msg_id=0):
-    """Port 0xE fragment modelled on the DS's own first message (pictochat.md 5b item 15): data = 03 00, MAC with each
+    """Port 0xE fragment modelled on the DS's own first message (PROTOCOL.md section 7): data = 03 00, MAC with each
     16-bit pair byte-swapped, UTF-16LE name, zeros, 04 00 05 01 at the end. The meaning of the fields is a guess."""
     sw = bytes(src[i ^ 1] for i in range(6))
     data = bytearray(84)
@@ -763,7 +763,7 @@ def swap16(b):
 
 def member_info_message(kind, mac_, name, color=2):
     """84-byte `03 xx` member message (kind 0 = joining, 1 = ready): 03 kind | MAC swapped | UTF-16 name (20 bytes) |
-    zeros | colour u16 | 01 01. Layout copied from the real host/client traces (pictochat.md 5b item 19)."""
+    zeros | colour u16 | 01 01. Layout copied from the real host/client traces (PROTOCOL.md section 7)."""
     d = bytearray(84)
     d[0], d[1] = 0x03, kind
     d[2:8] = swap16(mac_)
@@ -786,7 +786,7 @@ def fragments(msg_id, data, junk=0x69):
 def chat_message(mac_, image, header_tail=bytes.fromhex("0104090b101b")):
     """A drawn chat message: 03 02 | MAC swapped | 00 04 00 00 00 00 | 6 bytes (unknown, copied from real messages) |
     16 zero bytes | picture: 256 px wide, 16-px lines (1-5 lines, 2048 bytes each), 8x8 tiles of 4bpp, 32 tiles per
-    row. Verified on an emulated DS (pictochat.md 5b item 21). Real DSes send only the lines that contain ink."""
+    row. Verified on an emulated DS (PROTOCOL.md section 7). Real DSes send only the lines that contain ink."""
     assert len(image) % 2048 == 0 and 0 < len(image) <= 10240
     return b"\x03\x02" + swap16(mac_) + bytes.fromhex("000400000000") + header_tail + bytes(16) + image
 
@@ -1392,7 +1392,7 @@ def host(args):
          "Type a label + Enter for a marker, Ctrl-C to stop." % (mac(src), args.channel, args.room, args.out))
     tr = Tracker()
     stations = {}            # DS MAC -> frame count
-    rssi = {}                # DS MAC -> [last dBm, smoothed dBm, time heard, frames]  (for the bot's /connection)
+    rssi = {}                # DS MAC -> [last dBm, smoothed dBm, time heard, frames]  (reported in the state event)
     reply_t = [time.time(), -1]   # [time the reply counter last changed, its value]
     answered = set()
     aids = {}                # DS MAC -> AID (1..15)

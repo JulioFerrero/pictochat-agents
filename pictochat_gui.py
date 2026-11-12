@@ -7,7 +7,7 @@ Run the host with the GUI port, then this window as your normal user:
     sudo python3 pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777
     python3 pictochat_gui.py                      # connects to 127.0.0.1:7777
 
-A PictoChat message is a picture (256 x 80 pixels, see pictochat.md 5b item 19). So:
+A PictoChat message is a picture (256 x 80 pixels, see PROTOCOL.md section 7). So:
   * draw with the mouse on the canvas and press "Send drawing", or
   * type text and press "Send text" (needs Pillow: it renders the text into the picture), or
   * press "Load image..." to dither a picture file onto the canvas (Floyd-Steinberg, or threshold; "colour" maps

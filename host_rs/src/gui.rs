@@ -1,4 +1,4 @@
-//! Localhost JSON-lines link to pictochat_gui.py and pictochat_bot.py, the same protocol as pictochat.py's
+//! Localhost JSON-lines link to pictochat_gui.py and other clients (e.g. a chatbot), the same protocol as pictochat.py's
 //! GuiBridge: host -> client {"kind": "log"|"rx"|"tx"|"message"|"state", ...}; client -> host {"cmd": ...}.
 //! A client that connects late first gets the last 600 log/rx/tx/message events. Live events never block the
 //! host: a client that does not read loses lines, and one that takes only part of a line is dropped.
