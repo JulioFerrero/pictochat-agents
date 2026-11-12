@@ -9,8 +9,8 @@ The protocol is documented in pictochat.md.
 
   sudo python3 pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777   # the room
   python3 pictochat_gui.py                                                         # window: send text / drawings
-  sudo python3 pictochat.py capture --iface <wifi-interface> --out room_a           # sniff a real room
-  python3 pictochat.py analyze room_a.pcap                                         # decode a capture
+  sudo python3 pictochat.py capture --iface <wifi-interface> --out captures/room_a      # sniff a real room
+  python3 pictochat.py analyze captures/room_a.pcap                                # decode a capture
   python3 pictochat.py selftest
   python3 pictochat.py host --bridge 7778 --lockstep --channel 1                   # against the emulator (emu/)
 
@@ -49,7 +49,7 @@ MP_REPLY = bytes.fromhex("0309bf000010")  # client -> host
 MP_ACK = bytes.fromhex("0309bf000003")    # host -> clients (ack)
 MP_OUTSTANDING = 100                       # offload: packets queued on the ESP32 at most (it holds 128)
 BROADCAST = b"\xff" * 6
-# Nintendo OUIs seen on DS / Wii / USB Connector hardware (00:1b:7a was the DS Lite in room_a)
+# Nintendo OUIs seen on DS / Wii / USB Connector hardware (00:1b:7a was the test DS Lite)
 NINTENDO_OUIS = {bytes.fromhex(x) for x in ("0009bf", "001656", "0017ab", "00191d", "001ae9", "001b7a", "001bea", "001cbe", "001df0", "001e35", "001f32", "001fc5", "002147", "0022aa", "0022d7", "002331", "0023cc", "002444", "0024f3", "00253f", "0025a0", "002709", "40d28a", "e84ece", "a4c0e1", "7cbb8a", "9cbacf", "d86bf7")}
 
 MGMT_NAMES = {0: "assoc-req", 1: "assoc-resp", 2: "reassoc-req", 3: "reassoc-resp",
@@ -592,7 +592,7 @@ def analyze(args):
 # ---------------------------------------------------------------------------
 # host beacon (fake PictoChat room)
 #
-# Layout copied from a real DS Lite beacon (room_a.log) and the firmware (see pictochat.md, 5 and 5a).
+# Layout copied from a real DS Lite beacon (capture of a real room) and the firmware (see pictochat.md, 5 and 5a).
 
 LCG_A, LCG_C = 0x5EEDF715, 0x1B0CB173   # arm9 fn 0x0236B24C / 0x0236B1AC
 BEACON_UPDATE_EVERY = 25                # beacons per counter step (about 2.5 s on a real DS)

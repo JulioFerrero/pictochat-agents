@@ -1,5 +1,5 @@
 // Headless single-DS ROM runner around the melonDS core (GPLv3 core, linked as libcore.a), for testing homebrew
-// (e.g. ../ds_calendar) without a window. Boots the .nds directly (real BIOS/firmware from fw/), optionally with
+// (e.g. the DS Calendar, a separate repo) without a window. Boots the .nds directly (real BIOS/firmware from fw/), optionally with
 // an emulated DLDI SD card synced to a folder, then runs a deterministic script read from stdin:
 //   run N                 run N frames
 //   key MASK N            hold keys for N frames (bit0 A,1 B,2 Select,3 Start,4 Right,5 Left,6 Up,7 Down,8 R,9 L,10 X,11 Y)
