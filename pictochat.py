@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from collections import Counter, defaultdict
 
 __version__ = "0.2.0"
@@ -850,14 +851,69 @@ class MultiplayHost:
         self.asm = {}              # sender id -> bytearray
         self.messages = []         # complete messages received: (sender id, bytes)
         self.sent_ready = set()
+        # Virtual members: room members that exist only in the host (AI agents). They take a free slot (sender id)
+        # like a DS would, appear in the roster, announce themselves with member messages and send chat messages
+        # under their own id, so every DS shows them as people in the room. They never transmit: all traffic goes
+        # through the host anyway.
+        self.virtual_members = {}  # member id -> {"mac": bytes, "name": str, "color": int}
+        # Their messages wait here and go out one at a time, only while no DS is asking for or using the send
+        # token: a grant for a member the DS didn't see ask, arriving while the DS waits for its own grant, left a
+        # DS Lite unable to send (its send button only beeped).
+        self.virtual_queue = []    # [(member id, message bytes)]
+        self.ds_busy_until = 0.0   # time.time() until which a DS is (probably) mid-exchange on the token
 
     # ---- builders ----
     def roster(self):
+        """MACs by slot: 0 = the host, then each DS at its AID and each virtual member at its id. (With DSes at
+        AIDs 1..n and nothing else this is the same list a real host sends.)"""
         info = bytearray(0x60)
-        macs = [self.mac] + [c["mac"] for _a, c in sorted(self.clients.items())]
-        for i, m in enumerate(macs[:15]):
-            info[i * 6:i * 6 + 6] = swap16(m)
+        slots = {0: self.mac}
+        slots.update({aid: client["mac"] for aid, client in self.clients.items()})
+        slots.update({member_id: member["mac"] for member_id, member in self.virtual_members.items()})
+        for slot, member_mac in slots.items():
+            if 0 <= slot < 16:
+                info[slot * 6:slot * 6 + 6] = swap16(member_mac)
         return bytes(info)
+
+    def any_ds_joined(self):
+        """True once at least one DS has finished joining (messages can go out)."""
+        return any(client["stage"] == "joined" for client in self.clients.values())
+
+    def announce_virtual(self, member_id):
+        """The member's 'joining' and 'ready' messages, as the host relays them for a DS that joins. Queued in
+        virtual_queue: the 'ready' one goes out only after the DSes have answered the 'joining' one."""
+        member = self.virtual_members[member_id]
+        self.virtual_queue.append((member_id, member_info_message(0, member["mac"], member["name"], member["color"])))
+        self.virtual_queue.append((member_id, member_info_message(1, member["mac"], member["name"], member["color"])))
+
+    def pump_virtual(self, now=None):
+        """Move the next virtual member's message into the poll queue when the room is quiet: nothing else queued,
+        no DS busy with the send token, no DS message half received. A message whose member has left, or that comes
+        up while no DS is joined, is dropped."""
+        now = time.time() if now is None else now
+        if self.queue or not self.virtual_queue or now < self.ds_busy_until or self.asm:
+            return
+        member_id, message = self.virtual_queue.pop(0)
+        if member_id in self.virtual_members and self.any_ds_joined():
+            self.put_message(message, msg_id=member_id)
+            self.log("virtual member %s: %s (%d bytes)" % (
+                self.virtual_members[member_id]["name"], {0: "joining", 1: "ready", 2: "chat"}.get(message[1], "?"),
+                len(message)))
+
+    def add_virtual(self, member_id, member_mac, name, color):
+        """A virtual member takes slot `member_id`; it is announced now if a DS is in the room, else when one joins."""
+        self.virtual_members[member_id] = {"mac": bytes(member_mac), "name": name[:10], "color": color & 15}
+        if self.any_ds_joined():
+            self.announce_virtual(member_id)
+        self.log("virtual member %r joined as id %d" % (name, member_id))
+
+    def remove_virtual(self, member_id):
+        """Drop a virtual member and its messages that have not gone out yet."""
+        self.virtual_queue = [(queued_id, message) for queued_id, message in self.virtual_queue
+                              if queued_id != member_id]
+        member = self.virtual_members.pop(member_id, None)
+        if member:
+            self.log("virtual member %r left (id %d)" % (member["name"], member_id))
 
     def _type(self, t, val):
         return struct.pack("<HHI", t, 0x68, val & 0xFFFFFFFF) + self.roster()
@@ -880,16 +936,20 @@ class MultiplayHost:
             # count, because PictoChat can drop a packet it received while it was still busy with its previous step
             self.put(0xE, fr, min_sent=5 if i in (0, len(frs) - 1) else 1)
 
-    def send_chat(self, image):
+    def send_chat(self, image, member_id=0):
+        """A chat picture from the host (member_id 0) or from a virtual member. A virtual member's picture waits in
+        virtual_queue for a quiet room; without a joined DS any picture is held until one has joined."""
         # like a real DS: send only up to the last 16-px line that contains ink (2048 bytes per line)
         lines = max([i + 1 for i in range(len(image) // 2048) if any(image[i * 2048:(i + 1) * 2048])] or [1])
         image = image[:lines * 2048]
-        msg = chat_message(self.mac, image)
-        if any(c["stage"] == "joined" for c in self.clients.values()):
+        msg = chat_message(self.virtual_members[member_id]["mac"] if member_id else self.mac, image)
+        if self.any_ds_joined() and member_id:
+            self.virtual_queue.append((member_id, msg))
+        elif self.any_ds_joined():
             self.put_message(msg)
             self.log("queued chat message (%d bytes, %d fragments)" % (len(msg), (len(msg) + 159) // 160))
         else:
-            self.held.append(("msg", msg))
+            self.held.append(("msg", msg, member_id))
             self.log("no client has joined yet; holding the chat message until one has")
         return msg
 
@@ -914,6 +974,8 @@ class MultiplayHost:
         ptype = struct.unpack_from("<H", pl, 0)[0]
         if now - self.seen.get((port, pl), -9) < 0.0:
             return
+        if port in (0xD, 0xE):                 # a DS on the send token or sending: virtual members wait
+            self.ds_busy_until = now + 1.0
         if port == 0xC and ptype == 6 and c["stage"] == "assoc":
             c["stage"] = "hello"
             self.put(0xC, self._type(4, self.rand()), 9)
@@ -939,6 +1001,10 @@ class MultiplayHost:
                 if last:
                     msg = bytes(self.asm.pop(mid))
                     self.messages.append((mid, msg))
+                    # a member message: keep the DS's nickname and colour (the state event's "members")
+                    if msg[:1] == b"\x03" and msg[1:2] in (b"\x00", b"\x01") and len(msg) >= 84:
+                        c["name"] = msg[8:28].decode("utf-16-le", "replace").split("\x00")[0]
+                        c["color"] = struct.unpack_from("<H", msg, 80)[0] & 15
                     self.log("message from id %d complete: %d bytes, type %02x %02x" % (mid, len(msg), msg[0], msg[1]))
                     if msg[:2] == b"\x03\x00" and aid not in self.sent_ready:
                         self.sent_ready.add(aid)
@@ -947,9 +1013,18 @@ class MultiplayHost:
                         # the real host answers a newcomer's 03 01 with its own 03 01 once more
                         self.put_message(member_info_message(1, self.mac, self.name, self.color))
                         c["stage"] = "joined"
-                        for kind, data in self.held:
-                            if kind == "msg":
+                        if not c.get("announced"):                 # the agents already in the room, once
+                            c["announced"] = True
+                            for member_id in sorted(self.virtual_members):
+                                self.announce_virtual(member_id)
+                        # held entries are ("msg", message, sender id): 0 = the host, else a virtual member
+                        for kind, data, *sender in self.held:
+                            sender_id = sender[0] if sender else 0
+                            if kind == "msg" and not sender_id:
                                 self.put_message(data)
+                            elif kind == "msg" and sender_id in self.virtual_members:
+                                # after the member's announcement, and only when the DSes are quiet
+                                self.virtual_queue.append((sender_id, data))
                         self.held.clear()
                         self.log("client %d joined" % aid)
 
@@ -967,6 +1042,7 @@ class MultiplayHost:
 
     def next_entry(self):
         """(port, payload) for the next poll: the head of the queue (each packet is repeated), else an idle roster."""
+        self.pump_virtual()
         self.last_item = None
         if self.queue:
             item = self.queue[0]
@@ -1083,7 +1159,15 @@ class SerialSock:
         except ImportError:
             sys.exit("--serial needs pyserial: .venv/bin/pip install -r requirements.txt, then run with .venv/bin/python")
         try:
-            self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=1, exclusive=True)
+            # 921600 baud matters only for a classic ESP32 behind a USB-to-UART chip (MODEM_UART_BAUD in modem.c);
+            # native USB ignores it. Behind a USB-to-UART chip DTR and RTS stay low, so the board's auto-reset
+            # circuit leaves the ESP32 alone. On native USB (C3/S3 USB Serial/JTAG) the defaults must stay:
+            # lowering DTR and RTS there resets the chip.
+            self.ser = serial.Serial(None, 921600, timeout=0, write_timeout=1, exclusive=True)
+            self.ser.port = port
+            if not any(native_usb_name in port for native_usb_name in ("usbmodem", "ttyACM")):
+                self.ser.dtr, self.ser.rts = False, False
+            self.ser.open()
         except serial.SerialException as e:
             sys.exit("cannot open %s: %s\nIs the ESP32-C3 plugged in (ls /dev/ttyACM*)? Is another host already using "
                      "the port? Without root your user must be in the dialout group (sudo usermod -aG dialout $USER, "
@@ -1100,10 +1184,15 @@ class SerialSock:
         self.epoch = 0
         self.pushed = 0               # packets pushed since the last mp_clear (mod 65536)
         self.ser.reset_input_buffer()
-        self._write(b"C", bytes([channel]) + bytes(host_mac) + bytes([self.PHY_2M_LONG, 1 if forward_all else 0]))
-        deadline = time.time() + 5
+        # 'C' config (channel, host MAC, rate, forward all); the modem answers with an 'S' "ready ..." status
+        config = bytes([channel]) + bytes(host_mac) + bytes([self.PHY_2M_LONG, 1 if forward_all else 0])
+        deadline = time.time() + 6
         self.ready = False
+        next_config = 0
         while time.time() < deadline and not self.ready:
+            if time.time() >= next_config:      # again every second: a board that was still booting missed it
+                self._write(b"C", config)
+                next_config = time.time() + 1
             select.select([self.ser], [], [], 0.1)
             self._fill()
         if not self.ready:
@@ -1309,6 +1398,24 @@ def host_reply(src, f, st, aid=1):
     return None
 
 
+def virtual_member_mac(name):
+    """A made-up MAC for a virtual member, the same for the same name (any case): Nintendo OUI 00:1b:7a, then 23
+    bits of the name's CRC-32 with the top bit set (so it is never the host's default 00:1b:7a:00:00:01)."""
+    name_hash = zlib.crc32(name.lower().encode())
+    return bytes([0x00, 0x1b, 0x7a, 0x80 | ((name_hash >> 16) & 0x7f), (name_hash >> 8) & 0xff, name_hash & 0xff])
+
+
+def update_member_count(args, ml):
+    """After a virtual member joined or left: the member count in the beacon (the host, the DSes, the virtual
+    members). With a DS in the room the beacon nonce is refreshed too, as when a DS joins or leaves."""
+    host_state = getattr(args, "_host_state", None)        # set by host()
+    if host_state is not None:
+        aids = getattr(args, "_aids", {})
+        host_state.members = 1 + len(aids) + len(ml.virtual_members)
+        if aids:
+            host_state.on_members_changed()
+
+
 def handle_gui_cmd(c, args, ml, src, emit, gui):
     """Commands from pictochat_gui.py."""
     cmd = c.get("cmd") if isinstance(c, dict) else None
@@ -1332,8 +1439,36 @@ def handle_gui_cmd(c, args, ml, src, emit, gui):
             if not (isinstance(px, list) and len(px) == 80
                     and all(isinstance(r, list) and len(r) == 256 for r in px)):
                 raise ValueError("pixels must be 80 rows of 256 palette indices")
-            msg = ml.send_chat(bitmap_to_image(px))
-            gui("message", id=0, hex=msg.hex(), dir="tx")
+            sender_id = 0                       # the host
+            if c.get("as"):                     # from a virtual member (an agent), by name
+                wanted = str(c["as"]).lower()[:10]
+                sender_id = next((member_id for member_id, member in ml.virtual_members.items()
+                                  if member["name"].lower() == wanted), 0)
+                if not sender_id:
+                    emit("# gui: no member called %r; sending as the host" % c["as"])
+            msg = ml.send_chat(bitmap_to_image(px), sender_id)
+            gui("message", id=sender_id, hex=msg.hex(), dir="tx")
+        elif cmd == "member_add":   # {"cmd":"member_add","name":"Coder","color":11}: an agent joins the room
+            name = str(c["name"])[:10]
+            if any(member["name"].lower() == name.lower() for member in ml.virtual_members.values()):
+                emit("# gui: %s is already a member" % name)
+            else:
+                aids = getattr(args, "_aids", {})
+                # agents take the highest free slots (15 down), DSes the lowest
+                free_slots = [slot for slot in range(15, 0, -1)
+                              if slot not in aids.values() and slot not in ml.virtual_members]
+                if not free_slots:
+                    emit("# gui: the room is full (16 members)")
+                else:
+                    ml.add_virtual(free_slots[0], virtual_member_mac(name), name, int(c.get("color", 0)))
+                    update_member_count(args, ml)
+        elif cmd == "member_remove":  # {"cmd":"member_remove","name":"Coder"}
+            name = str(c["name"]).lower()[:10]
+            leaving = [member_id for member_id, member in ml.virtual_members.items()
+                       if member["name"].lower() == name]
+            for member_id in leaving:
+                ml.remove_virtual(member_id)
+            update_member_count(args, ml)
         elif cmd == "mp_period":  # {"cmd":"mp_period","ms":5}: change the ESP32 poll interval while running (--offload)
             sock = getattr(args, "_sock", None)
             if sock is None or not getattr(args, "_offload", False):
@@ -1343,6 +1478,15 @@ def handle_gui_cmd(c, args, ml, src, emit, gui):
                 sock.mp_config(True, args.clienttime, args.cmd_word, args.cmdcount, args.mp_period_ms * 1000,
                                args.reply_wait * 1000, args.poll_cycle)
                 emit("# gui: ESP32 poll interval now %.2f ms" % args.mp_period_ms)
+        elif cmd == "display":  # {"cmd":"display","type":"D"|"B","hex":"..."}: a frame for the modem board's screen
+            sock = getattr(args, "_sock", None)
+            if sock is None or not hasattr(sock, "_write"):
+                emit("# gui: display needs --serial (a modem board with a screen)")
+            elif c.get("type") in ("D", "B"):
+                try:
+                    sock._write(c["type"].encode(), bytes.fromhex(c["hex"]))
+                except (ValueError, struct.error, OSError) as error:   # a bad or too big frame, a stuck port
+                    emit("# gui: display frame dropped: %s" % error)
         elif cmd == "echo":
             emit("# gui: the host always echoes client messages now (echo setting ignored)")
         elif cmd in ("say", "draw"):
@@ -1422,8 +1566,8 @@ def host(args):
                                  else "from this program every %.1f ms" % args.poll_ms))
     commit = build_commit()
     radio = ("emulator bridge" if args.bridge else
-             "ESP32-C3 modem, polls on the ESP32" if offload else
-             "ESP32-C3 modem, polls from the host" if args.serial else "Wi-Fi adapter %s" % args.iface)
+             "ESP32 modem, polls on the ESP32" if offload else
+             "ESP32 modem, polls from the host" if args.serial else "Wi-Fi adapter %s" % args.iface)
     emit("# pictochat.py %s%s, radio: %s" % (__version__, " (commit %s)" % commit if commit else "", radio))
 
     def gui(kind, **kw):
@@ -1448,6 +1592,7 @@ def host(args):
     reply_t = [time.time(), -1]   # [time the reply counter last changed, its value]
     answered = set()
     aids = {}                # DS MAC -> AID (1..15)
+    args._host_state, args._aids = st, aids  # for the member_add / member_remove GUI commands
     mp = Counter()
     seen_mp = set()
     next_poll = None
@@ -1467,6 +1612,7 @@ def host(args):
     assem = {}
     stats = Counter()
     sent = 0
+    send_errors = 0                 # beacons that failed in a row
     next_t = t0
     next_status = t0 + 5
 
@@ -1480,6 +1626,9 @@ def host(args):
                 emit("---- MARKER: " + markers.pop(0))
             while not cmdq.empty():
                 handle_gui_cmd(cmdq.get(), args, ml, src, emit, gui)
+            # virtual members (agents) speak only when everything before them is on the air and the DSes are quiet
+            if not offload or sock.mp_outstanding() == 0:
+                ml.pump_virtual(now)
             # offload: hand queued packets to the ESP32, which repeats each one on its polls until confirmed
             while offload and ml.queue and sock.mp_outstanding() < MP_OUTSTANDING:
                 port_, pl_, reps_, _ann, min_sent_ = ml.queue.pop(0)[:5]
@@ -1490,6 +1639,7 @@ def host(args):
                 try:
                     sock.send(tx_radiotap(2) + build_beacon(src, args.channel, st, st.tsf))
                     sent += 1
+                    send_errors = 0
                     next_t += st.interval * 1.024e-3
                     if next_t < now - 1:
                         next_t = now
@@ -1497,6 +1647,10 @@ def host(args):
                     pass
                 except OSError as e:
                     emit("# send error: %s" % e)
+                    send_errors += 1
+                    if send_errors >= 4:        # the radio is gone (USB unplugged, board reset): let run.py restart
+                        emit("# the radio stopped answering; exiting")
+                        sys.exit(3)
                     time.sleep(0.5)
             if aids and not args.no_poll and not offload and next_poll is None:
                 next_poll = now
@@ -1588,7 +1742,13 @@ def host(args):
                     uptime=round(now - t0), aids={mac(k): v for k, v in aids.items()}, cmd=mp["cmd"],
                     replies=mp["reply"], beacons=sent,
                     echo=bool(args.echo), cycle=args.poll_cycle_joined, reply_age=round(now - reply_t[0], 1),
-                    rssi={mac(k): [v[0], round(v[1], 1), round(now - v[2], 1), v[3]] for k, v in rssi.items()})
+                    rssi={mac(k): [v[0], round(v[1], 1), round(now - v[2], 1), v[3]] for k, v in rssi.items()},
+                    # slot -> [name, colour] for the host and each named DS, [name, colour, "agent"] for agents
+                    members=dict([("0", [ml.name, ml.color])]
+                                 + [(str(aid), [client["name"], client.get("color", 0)])
+                                    for aid, client in ml.clients.items() if client.get("name")]
+                                 + [(str(member_id), [member["name"], member["color"], "agent"])
+                                    for member_id, member in ml.virtual_members.items()]))
             r = [sock] if getattr(sock, 'pending', None) else select.select([sock], [], [], max(0.0, min(0.02, next_t - time.time())))[0]
             if not r:
                 continue
@@ -1638,7 +1798,7 @@ def host(args):
                         ml.on_reply(aids[bytes(f.a2)], port, pl, nowt)
                         for mid_, msg_ in ml.messages[nmsg:]:
                             emit("# DS message complete: id %d, %d bytes: %s" % (mid_, len(msg_), msg_[:48].hex()))
-                            gui("message", id=mid_, hex=msg_.hex(), dir="rx")
+                            gui("message", id=mid_, hex=msg_.hex(), dir="rx", mac=mac(f.a2))   # who sent it
                 if ack_deadline is not None:
                     if f.a2 and bytes(f.a2) in aids:
                         ack_fail &= ~(1 << aids[bytes(f.a2)]) & 0xFFFF   # that client answered
@@ -1652,7 +1812,7 @@ def host(args):
                     if not aids:
                         sock.mp_clear()
                     sock.mp_clients(aids)
-                st.members = 1 + len(aids)
+                st.members = 1 + len(aids) + len(ml.virtual_members)
                 st.on_members_changed()
             if f.cls.startswith("MP-") or (f.ftype == 2 and f.a1 and bytes(f.a1)[:3] == MP_PREFIX):
                 key = (f.cls, bytes(f.body[2:] if f.cls == "MP-CMD" else f.body).hex())
@@ -1680,7 +1840,8 @@ def host(args):
                 if f.cls == "assoc-req":
                     m_ = bytes(f.a2)
                     if m_ not in aids:
-                        free = [a for a in range(1, 16) if a not in aids.values()]
+                        free = [slot for slot in range(1, 16)
+                                if slot not in aids.values() and slot not in ml.virtual_members]
                         if free:
                             aids[m_] = free[0]
                     aid = aids.get(m_, 1)
@@ -1690,7 +1851,7 @@ def host(args):
                         if offload:
                             sock.mp_clear()                     # on_assoc dropped the queue: drop the modem's too
                             sock.mp_clients(aids, reopen=True)
-                        st.members = 1 + len(aids)
+                        st.members = 1 + len(aids) + len(ml.virtual_members)
                         st.status = 0xBD8A
                         st.on_members_changed()
                         cmd_first = True

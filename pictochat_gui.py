@@ -35,8 +35,11 @@ import socket
 import struct
 import threading
 import time
-import tkinter as tk
-from tkinter import ttk
+try:
+    import tkinter as tk
+    from tkinter import ttk
+except ImportError:       # the picture helpers below work without Tk (bots such as agents/claude_agent.py)
+    tk = ttk = None
 
 PW, PH = 256, 80                  # size of a PictoChat message picture
 SCALE = 2
@@ -149,7 +152,7 @@ TEXT_X0, TEXT_X1, TEXT_LINES = 26, 250, 4      # text area: lines 2-5 of the pic
 
 def _font():
     from PIL import ImageFont
-    for name in ("DejaVuSans.ttf", "FreeSans.ttf", "LiberationSans-Regular.ttf"):
+    for name in ("DejaVuSans.ttf", "FreeSans.ttf", "LiberationSans-Regular.ttf", "/System/Library/Fonts/Geneva.ttf"):
         try:
             return ImageFont.truetype(name, 13)
         except OSError:
