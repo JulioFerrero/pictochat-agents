@@ -1,0 +1,5 @@
+#!/bin/sh
+# PictoChat AI agents: ./pictoagents help
+# Runs tools/ctl.py with the project's virtualenv, from wherever it is called.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec "$ROOT/.venv/bin/python" "$ROOT/tools/ctl.py" "$@"
