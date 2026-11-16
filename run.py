@@ -9,8 +9,8 @@ if anything crashes, it is restarted.
 pictoagents.json (optional, next to this file; command-line options win):
     {"serial": "auto", "trust": ["00:09:bf:12:34:56"], "screen": "waveshare-s3-lcd2", "name": "Claude", "color": 4,
      "members": true}
-"name" and "color" are the host's nickname and colour in the room; "members": true makes each agent a room member
-of its own (experimental).
+"name" and "color" are the host's nickname and colour in the room; each agent is a member of the room unless "members"
+is false.
 
 Logs go to logs/host.log and logs/manager.log. Usually started in the background by `./pictoagents start` (and
 stopped by `./pictoagents stop`); nothing is installed to run at login.
@@ -103,7 +103,7 @@ def read_settings():
     options.screen = options.screen or config.get("screen")
     options.name = config.get("name", "Claude")
     options.color = str(config.get("color", 4))
-    options.members = bool(config.get("members"))
+    options.members = bool(config.get("members", True))      # agents are room members unless "members": false
     return options
 
 
@@ -119,7 +119,7 @@ def manager_command(options):
         command += ["--trust", ds_mac]
     if options.screen:
         command += ["--screen", options.screen]
-    if options.members:                     # agents as room members of their own (experimental)
+    if options.members:                     # each agent a member of the room, with its own name tab
         command += ["--members"]
     return command
 
