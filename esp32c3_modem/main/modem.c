@@ -1,5 +1,8 @@
 /*
- * PictoChat radio modem for the ESP32-C3 (USB-C = USB Serial/JTAG).
+ * PictoChat radio modem for the ESP32-C3 and ESP32-S3 (native USB = USB Serial/JTAG) and for the classic ESP32,
+ * whose only USB link is a USB-to-UART chip (e.g. the CH340 on an ESP32-2432S028): there it talks on UART0 at
+ * MODEM_UART_BAUD. The link_* functions below hide which of the two it is.
+ * An optional screen on the modem board is driven with 'D' and 'B' frames from the PC: see lcd.c.
  *
  * The PC runs the protocol (pictochat.py host --serial /dev/ttyACM0); this firmware only moves raw 802.11
  * frames between the USB link and the radio:
@@ -40,7 +43,14 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "nvs_flash.h"
+#include "soc/soc_caps.h"
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
 #include "driver/usb_serial_jtag.h"
+#else
+#include "driver/uart.h"
+/* UART0 goes through the board's USB-to-UART chip; the host opens the port at the same rate */
+#define MODEM_UART_BAUD 921600
+#endif
 
 /* The Wi-Fi library refuses auth/assoc responses in esp_wifi_80211_tx. 0 = frame allowed (the caller branches
  * to its error path on non-zero). Linked with -zmuldefs, this definition replaces the library's. */
@@ -115,6 +125,40 @@ static int64_t last_fwd[16];
 
 /* ---------------------------------------------------------------- USB link */
 
+/* link_read() returns the number of bytes read (0 after 20 ms without data) */
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+static void link_init(void)
+{
+    usb_serial_jtag_driver_config_t usb_config = { .tx_buffer_size = 8192, .rx_buffer_size = 8192 };
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_config));
+}
+static void link_write(const void *data, size_t length)
+{
+    usb_serial_jtag_write_bytes(data, length, pdMS_TO_TICKS(50));
+}
+static int link_read(uint8_t *buffer, size_t size)
+{
+    return usb_serial_jtag_read_bytes(buffer, size, pdMS_TO_TICKS(20));
+}
+#else
+static void link_init(void)
+{
+    uart_config_t uart_config = { .baud_rate = MODEM_UART_BAUD, .data_bits = UART_DATA_8_BITS,
+                                  .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
+                                  .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_SCLK_DEFAULT };
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 8192, 8192, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+}
+static void link_write(const void *data, size_t length)
+{
+    uart_write_bytes(UART_NUM_0, data, length);
+}
+static int link_read(uint8_t *buffer, size_t size)
+{
+    return uart_read_bytes(UART_NUM_0, buffer, size, pdMS_TO_TICKS(20));
+}
+#endif
+
 static void usb_send(uint8_t type, const void *a, size_t alen, const void *b, size_t blen)
 {
     uint8_t hdr[5] = { 0xAA, 0x55, type, (uint8_t)((alen + blen) & 0xFF), (uint8_t)((alen + blen) >> 8) };
@@ -122,10 +166,10 @@ static void usb_send(uint8_t type, const void *a, size_t alen, const void *b, si
     for (size_t i = 0; i < alen; i++) x ^= ((const uint8_t *)a)[i];
     for (size_t i = 0; i < blen; i++) x ^= ((const uint8_t *)b)[i];
     xSemaphoreTake(usb_lock, portMAX_DELAY);
-    usb_serial_jtag_write_bytes(hdr, 5, pdMS_TO_TICKS(50));
-    if (alen) usb_serial_jtag_write_bytes(a, alen, pdMS_TO_TICKS(50));
-    if (blen) usb_serial_jtag_write_bytes(b, blen, pdMS_TO_TICKS(50));
-    usb_serial_jtag_write_bytes(&x, 1, pdMS_TO_TICKS(50));
+    link_write(hdr, 5);
+    if (alen) link_write(a, alen);
+    if (blen) link_write(b, blen);
+    link_write(&x, 1);
     xSemaphoreGive(usb_lock);
 }
 
@@ -138,6 +182,20 @@ static void status(const char *fmt, ...)
     va_end(ap);
     if (n < 0) return;
     usb_send('S', s, n < (int)sizeof s ? n : (int)sizeof s - 1, NULL, 0);
+}
+
+/* lcd.c, the optional screen on the modem board: lcd_handle() takes the screen frames ('D', 'B') and returns true
+ * for them; lcd.c reports through modem_status(), an 'S' status line like status() */
+bool lcd_handle(uint8_t type, const uint8_t *payload, uint16_t length);
+void modem_status(const char *format, ...)
+{
+    char text[160];
+    va_list args;
+    va_start(args, format);
+    int length = vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    if (length < 0) return;
+    usb_send('S', text, length < (int)sizeof text ? length : (int)sizeof text - 1, NULL, 0);
 }
 
 /* ---------------------------------------------------------------- radio */
@@ -509,7 +567,7 @@ static void handle(uint8_t type, const uint8_t *p, uint16_t len)
         status("pong rx=%lu rxdrop=%lu tx=%lu txerr=%lu mp_polls=%lu mp_replies=%lu mp_txerr=%lu",
                (unsigned long)n_rx, (unsigned long)n_rx_drop, (unsigned long)n_tx, (unsigned long)n_tx_err,
                (unsigned long)mp_polls, (unsigned long)mp_replies, (unsigned long)mp_txerr);
-    } else {
+    } else if (!lcd_handle(type, p, len)) {
         mp_handle(type, p, len);
     }
 }
@@ -518,13 +576,13 @@ static void handle(uint8_t type, const uint8_t *p, uint16_t len)
 
 static void usb_rx_task(void *arg)
 {
-    static uint8_t frame[2048];
+    static uint8_t frame[8192];                    /* a screen band ('B', lcd.c) takes up to 8 + 3 x 320 x 8 bytes */
     uint8_t buf[256];
     int state = 0, type = 0;
     uint16_t len = 0, got = 0;
     uint8_t x = 0;
     for (;;) {
-        int n = usb_serial_jtag_read_bytes(buf, sizeof buf, pdMS_TO_TICKS(20));
+        int n = link_read(buf, sizeof buf);
         for (int i = 0; i < n; i++) {
             uint8_t c = buf[i];
             switch (state) {
@@ -576,8 +634,7 @@ void app_main(void)
     }
     usb_lock = xSemaphoreCreateMutex();
     rxq = xQueueCreate(RXQ_LEN, sizeof(rx_item_t));
-    usb_serial_jtag_driver_config_t ucfg = { .tx_buffer_size = 8192, .rx_buffer_size = 8192 };
-    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&ucfg));
+    link_init();
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
