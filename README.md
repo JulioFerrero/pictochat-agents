@@ -1,223 +1,212 @@
-# PictoChat host for  Nintendo DS
+# PictoChat Agents
 
-Host a PictoChat room from a PC (or a Raspberry Pi). A real DS lists the room, joins it and shows the text, drawings
-and dithered pictures you send. Messages drawn on the DS come back to the PC.
+AI agents that live in a Nintendo DS PictoChat room.
 
-- **`pictochat.py`** is the host, written in Python with only the standard library. It also captures and decodes real
-  rooms.
-- **`pictochat_gui.py`** is a window for sending text, drawings and pictures into the room.
-- **`esp32c3_modem/`** is firmware that turns an ESP32-C3 board into the host's radio. This is the easy hardware route:
-  no monitor-mode adapter is needed.
-- **`host_rs/`** is the same host in Rust, for the ESP32 modem on small machines like a Pi Zero.
-- **[`PROTOCOL.md`](PROTOCOL.md)** explains in detail how PictoChat works on the air, with diagrams.
-- **`emu/`** is a headless two-DS emulator test bed, built on the melonDS core.
-- **[`API.md`](API.md)** describes the JSON-lines interface for your own bots and bridges, with a minimal example in
-  `examples/echo_bot.py`.
+Open PictoChat on a DS, enter Chat Room A, and Claude is there. It reads what you type, write by hand or draw,
+answers in PictoChat's own small font, and can draw on your pictures (it plays tic-tac-toe on the board you drew).
+Write `/new Coder pc writes code` and a second agent joins the room. If your DS is trusted, that agent can work on
+your Mac: from a DS Lite, one was asked to find a bug in a project, fix it and open a pull request, and did, in
+under a minute.
 
-![our host's text and a dithered picture on an emulated DS](emu/screenshots/python_host_text_and_dithered_image.png)
+The DS doesn't know any of this is AI. It sees an ordinary room hosted by another DS.
 
-Measured on a real DS Lite: a one-line text arrives in 0.6 s, a two-line text in 0.8 s and a full-size picture in
-1.2 s.
+<p align="center">
+  <img src="docs/images/ds-lite-coder.jpg" width="49%"
+       alt="A DS Lite in PictoChat: the agent Coder reports that it fixed a bug and opened pull request #79">
+  <img src="docs/images/s3-status-screen.jpg" width="49%"
+       alt="The ESP32-S3 radio board's screen: room A, the agents Claude and Coder, and the DS in the room">
+</p>
+<p align="center"><sub>Left: Coder, a member of the room, reporting the pull request it opened when asked from the
+DS. Right: the radio board's status screen.</sub></p>
 
-## Hardware: pick a radio
-
-The DS speaks 802.11b at 2 Mbit/s with Nintendo's own multiplay protocol, so the radio must be able to send raw frames
-with a chosen source MAC address.
+## How it works
 
 ```mermaid
 flowchart LR
-    DS(["Nintendo DS"]) <-- "802.11b, 2 Mbit/s" --> R
-    subgraph R["radio"]
-        A["USB Wi-Fi adapter<br/>monitor mode + injection"]
-        E["ESP32-C3 board<br/>esp32c3_modem firmware"]
-    end
-    A <-- "raw frames" --> P1["pictochat.py host --iface"]
-    E <-- "USB serial: raw frames" --> P2["pictochat.py host --serial"]
-    E <-- "USB serial: packets only<br/>(ESP32 runs the polling)" --> P3["pictochat.py host --serial --offload<br/>or host_rs (pictochat-host)"]
-    P1 & P2 & P3 <-- "JSON lines on 127.0.0.1:7777" --> G["pictochat_gui.py<br/>(or your own client)"]
+    DS(["Nintendo DS<br/>PictoChat"]) <-- "802.11b, Nintendo's<br/>multiplay protocol" --> R["ESP32 radio<br/>hosts the room"]
+    R <-- "USB" --> H["pictochat.py host<br/>(on the Mac)"]
+    H <-- "JSON lines<br/>127.0.0.1:7777" --> M["agents/manager.py"]
+    M <--> C1["Claude"]
+    M <--> C2["Coder"]
+    M <--> C3["..."]
+    R --- S["status screen<br/>(optional)"]
 ```
 
-| Radio | Notes |
+- **The radio** (`esp32c3_modem/`) is ESP32 firmware that sends and receives the DS's raw Wi-Fi frames and runs the
+  timing-critical polling. Macs can't inject Wi-Fi frames, so the radio does.
+- **The host** (`pictochat.py`) speaks PictoChat: it advertises the room, lets DSes join and relays every message.
+  It comes from [LNYmachines/pictochat-host](https://github.com/LNYmachines/pictochat-host), extended here so that
+  agents can be members of the room, the radio board can show a screen, and the host survives the radio being
+  unplugged.
+- **The agents** (`agents/`). Messages on the DS are pictures, not text. A small fast model reads each one first, so
+  commands work typed or handwritten. The manager then passes the picture to the agent it is for. Each agent is
+  its own long-lived [Claude Code](https://claude.com/claude-code) session, with its own name, colour, tools and
+  folder. Replies are drawn back into PictoChat pictures.
+- **The status screen** (`display/`) shows the room, the agents and what each one is doing (thinking, searching the
+  web, running a command), on the radio board's own screen or on a separate one.
+
+## What you need
+
+| | Tested with | Also works |
+|---|---|---|
+| DS | DS Lite | DS, DSi (PictoChat in DS mode) |
+| Radio | Waveshare ESP32-S3-LCD-2 (an ESP32-S3 with a 2" screen) | ESP32-C3 boards (upstream's choice). A classic ESP32 builds but is untested on air |
+| Computer | macOS on Apple Silicon | Linux should work for everything but the setup notes |
+| AI | [Claude Code](https://claude.com/claude-code), logged in | a Claude subscription or an API key |
+
+The radio board must be plugged in through the chip's own USB port (on boards with two ports, the one marked USB).
+
+## Setup
+
+```sh
+git clone https://github.com/JulioFerrero/pictochat-agents.git && cd pictochat-agents
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+**Flash the radio** (once). You need [ESP-IDF 5.4](https://docs.espressif.com/projects/esp-idf/en/v5.4.1/esp32s3/get-started/index.html)
+installed in `~/esp/esp-idf-v5.4.1` (or `IDF_PATH` set). The script finds the board, works out the chip, builds and
+flashes:
+
+```sh
+tools/flash_modem.sh            # or: tools/flash_modem.sh /dev/cu.usbmodem1101
+```
+
+**Settings** go in `pictoagents.json` (not committed; every key is optional):
+
+```json
+{
+  "serial": "auto",
+  "trust": ["00:09:bf:12:34:56"],
+  "screen": "waveshare-s3-lcd2",
+  "name": "Claude",
+  "color": 4,
+  "members": true
+}
+```
+
+- `trust`: the hardware (MAC) addresses of the DSes that may make agents use the computer. To find yours, start
+  without it, enter the room and run `./pictoagents status`.
+- `screen`: draw the status screen on the radio board. Leave it out on a board without one.
+- `members`: agents join the room as people of their own. Without it, every reply comes from the host, starting
+  with the agent's name.
+- `attribution`: what agents write on their commits and pull requests (see below).
+
+## Use
+
+```sh
+./pictoagents start      # radio host, agents and status screen, in the background
+./pictoagents status     # radio signal, who is in the room, each agent and what it is doing
+./pictoagents logs       # the agents' log (or: logs host, logs run)
+./pictoagents say hola   # write into the room
+./pictoagents agents     # the agents, their folders and the trusted DSes
+./pictoagents stop
+```
+
+`start` runs an ordinary background process (`run.py`) that restarts the host and the agents if they stop, for
+example when the radio is unplugged. Nothing is installed to run at login. `status --json` is meant for other
+programs, such as another Claude session or a small UI.
+
+Then, on the DS, open PictoChat and enter **Chat Room A**.
+
+### On the DS
+
+| Write | What happens |
 |---|---|
-| **ESP32-C3 on USB** (recommended) | Any ESP32-C3 board with native USB (USB Serial/JTAG). Flash `esp32c3_modem/`. With `--offload` the ESP32 runs the poll loop itself: 100-143 polls/s, 91-96 % answered. |
-| **Nintendo Wi-Fi USB Connector** (Ralink RT2570) | Works as is in monitor mode. About 76 polls/s from Python. |
-| Other monitor-mode adapters | They must inject at **2 Mbit/s**, because the DS ignores polls sent at 1 Mbit/s. Atheros AR9271 (`ath9k_htc`) sends injected frames at 1 Mbit/s unless its firmware is patched. |
+| anything | the agent you last talked to answers (at first, Claude) |
+| `@Coder message` | talk to one agent; your next messages go to it too |
+| `/new Chef cooks and gives recipes` | a new chat agent (it can search the web) |
+| `/new Coder pc writes code` | an agent that works on the computer, in `~/PictoAgents/Coder` (trusted DSes only) |
+| `/agents` | who is here and what each one is doing |
+| `/stop Chef` | the agent leaves |
+| `/trust Ana` | Ana's DS is trusted too (trusted DSes only) |
+| `/help` | the commands |
 
-## Quick start
+Agents can also draw: on a blank picture, or on top of the last one you sent (a move on your tic-tac-toe board, a
+correction, an addition to your drawing).
 
-You need Python 3 with `venv` and Tk. On Debian, Ubuntu or Mint: `sudo apt install python3-venv python3-tk`.
+## Security
 
-```
-git clone https://github.com/LNYmachines/pictochat-host.git && cd pictochat-host
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # Pillow and pyserial
+PictoChat has no passwords: anyone within about 20 metres with a DS can enter the room.
 
-# EITHER with a monitor-mode adapter: find its name with `iw dev` (e.g. wlx…); root is needed for the radio
-sudo .venv/bin/python pictochat.py host --iface <wifi-interface> --channel 1 --gui-port 7777
+- **Anyone can chat** with the agents and use their web search.
+- **Only trusted DSes can make agents use the computer.** Every DS has a hardware address that PictoChat can't
+  change (unlike the nickname). Agents that work on the computer have a Claude Code hook (`agents/gate.py`) that
+  runs before every terminal or file tool. It allows the tool only when every message the agent is answering came
+  from a trusted address. Claude Code enforces the hook, so persuading the agent gets nobody past it.
+- **The limits:** the address is sent unencrypted, so someone with a modified radio (like this project's) could copy
+  it; a normal DS can't. Computer agents start in their own folder, but their terminal can reach the rest of
+  your account. Trust only DSes you own.
+- **Local data:** logs and `captures/` hold the room's messages and the DSes' addresses. Git ignores them.
 
-# OR with the ESP32-C3 modem (flash it first, see esp32c3_modem/ below)
-.venv/bin/python pictochat.py host --serial /dev/ttyACM0 --offload --channel 1 --gui-port 7777
+A Claude subscription is for your own use of Claude Code. If other people use your agents, Anthropic's
+[terms](https://code.claude.com/docs/en/legal-and-compliance.md) ask for an API key instead.
 
-# then, in a second terminal, as your normal user:
-.venv/bin/python pictochat_gui.py
-```
+## Commits and pull requests
 
-- **ESP32 serial port:** opening `/dev/ttyACM0` without root needs the `dialout` group. Run
-  `sudo usermod -aG dialout $USER` once, then log out and back in.
-- **What success looks like:** the host prints a status line every 5 s. When a DS joins, the log shows
-  `# client 1 hello` and then `# client 1 joined`.
-- **No radio yet?** `python3 pictochat.py selftest` checks the frame builders without any hardware and should end
-  with `selftest OK`.
-- **No git** (Raspberry Pi OS Lite ships without it)? Either `sudo apt install git`, or fetch the code with
-  `curl -L https://github.com/LNYmachines/pictochat-host/archive/refs/heads/main.tar.gz | tar xz`.
-- **Headless machine** (a Pi over ssh): `pictochat_gui.py` needs a display. Send from the command line instead with
-  `.venv/bin/python emu/sendchat.py 7777 "text"`, or run a bot such as `examples/echo_bot.py`.
+Agents that work on the computer sign what they make, through Claude Code's `attribution` setting:
 
-On the DS, open PictoChat and choose Chat Room A. Then, in the window:
-- **Send text** types a message.
-- **Send drawing** sends what you drew on the canvas.
-- **Load image...** loads a picture, and **Send drawing** then sends it.
+> 🎮 Generated by Coder with PictoChat x [Claude Code](https://claude.com/claude-code), from a Nintendo DS
 
-## The tools
+Change the wording in `pictoagents.json` (`{agent}` is the agent's name):
 
-### `pictochat.py`
-
-- **`host`** runs the PictoChat host.
-  - Room options: `--iface` or `--serial`, `--channel` (1 for room A), `--room` (0-3 = A-D), `--mac` (also set on the
-    adapter), `--name` (the nickname shown on the DS, at most 10 characters) and `--color` (0-15).
-  - Pace and delivery: `--poll-ms` (5), `--reply-wait` (4 ms), `--poll-cycle` and `--poll-cycle-joined` (1 / 1),
-    `--hello-repeats` (8, the most copies sent of any packet) and `--no-confirm`. `PROTOCOL.md` section 9 explains the
-    delivery rule.
-  - ESP32 options: `--offload` and `--mp-period-ms` (7).
-  - Output: `--out` (base name for the log and pcap, default `host_log`), `--all` and `--gui-port 7777`.
-  - Testing: `--bridge PORT --lockstep` (emulator), `--dry-run PCAP` and `--seed`.
-  - The log shows each protocol step, every frame from the DS and a status line every 5 s.
-- **`capture`** sniffs a real room. It hops channels until it hears a DS, then writes a pcap and a decoded log. Type a
-  label and press Enter to drop a marker into the log.
-- **`analyze`** decodes a pcap.
-- **`selftest`** checks the frame builders against known bytes.
-- The protocol code lives in the I/O-free class `MultiplayHost` and in helpers such as `member_info_message`,
-  `chat_message`, `bitmap_to_image`, `fragments`, `type1_payload`, `gameinfo`, `build_cmd` and `build_ack`.
-
-### `pictochat_gui.py`
-
-- **Sending:**
-  - A text box with **Send text** renders the text into a picture.
-  - A 256×80 canvas with **Send drawing** sends what you drew. Greyed-out areas are not shown by the DS and are
-    clipped.
-  - **Load image...** fits a picture file into the visible area (230 × 64 px) and dithers it with Floyd-Steinberg to
-    black and white, or to the 16-colour palette when **colour** is ticked.
-- A row of pen colours, with all 15 ink colours.
-- A packet list with a hex dump for each packet. Received drawings are shown as pictures.
-- A command line with `say`, `draw`, `clear`, `pen`, `line`, `raw <port> <hex>`, `image <file>`, `save` and `help`.
-- **The GUI port** is a JSON-lines protocol on `127.0.0.1`. Other programs can use it too, such as a chatbot or a
-  bridge to another room. They receive the room's packets and events, and they send messages. See
-  [`API.md`](API.md).
-
-### `esp32c3_modem/` (ESP-IDF 5.4)
-
-You need ESP-IDF 5.4. Install it with Espressif's
-[Linux setup guide](https://docs.espressif.com/projects/esp-idf/en/v5.4.1/esp32c3/get-started/linux-macos-setup.html)
-(`git clone -b v5.4.1 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf`, then
-`~/esp/esp-idf/install.sh esp32c3`). Then, in every new terminal:
-
-```
-. ~/esp/esp-idf/export.sh            # puts idf.py on the PATH
-cd esp32c3_modem
-idf.py set-target esp32c3            # once
-idf.py build flash -p /dev/ttyACM0
+```json
+"attribution": {"commit": "Generated by {agent} from a DS\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+                "pr": "Generated by {agent} from a DS"}
 ```
 
-A board that doesn't flash may need download mode: hold BOOT, press RESET, then release BOOT.
+## Testing without a DS
 
-- The modem moves raw frames between USB and the air. It sends at a fixed 2 Mbit/s with the long preamble, and it
-  receives in promiscuous mode with an on-chip filter. Its station MAC is set to the host MAC, so the hardware ACKs the
-  DS.
-- ESP-IDF refuses to send auth and assoc responses with `esp_wifi_80211_tx`. Its sanity check is therefore replaced at
-  link time (`-Wl,-zmuldefs`).
-- USB framing is `AA 55 | type | u16 len | payload | xor8`. The message types are listed in `modem.c`.
-- **Plain mode** (`--serial`): the PC builds every frame, polling included. That gives about 50 polls/s.
-- **Offload mode** (`--offload`): the ESP32 runs the poll / reply / ACK cycle itself, and the PC only pushes and
-  receives PictoChat packets. Measured with a real DS:
+`tools/fake_room.py` stands in for the host: it replays a DS joining, sends pictures with text on them (or captures
+from `captures/`) and saves the agents' replies as PNGs. To keep test agents away from the real ones, point
+`PICTO_STATE_DIR` and `PICTO_PC_HOME` at a scratch folder:
 
-  | Poll interval | Polls/s | Answered |
-  |---|---|---|
-  | 20 ms | 50 | 92 % |
-  | 10 ms | 100 | 96 % |
-  | 7 ms (default) | 143 | 91 % |
-  | 5 ms | 200 | 79 % |
+```sh
+export PICTO_STATE_DIR=/tmp/picto-test PICTO_PC_HOME=/tmp/picto-test/pc FAKE_OUT=/tmp/picto-test
+.venv/bin/python tools/fake_room.py 7799 Ana 'hola!' '/new Coder pc writes code' '@coder create notes.txt' &
+.venv/bin/python agents/manager.py --port 7799 --trust 00:09:bf:12:34:56
+```
 
-  At 2.5 ms the DS never answered, and beacon TX failed with `ESP_ERR_NO_MEM`. Keep the PictoChat channel away from
-  the channel your own Wi-Fi uses.
+`display/room_display.py --preview room.png` draws the room screen without hardware. `pictochat.py selftest`
+checks the PictoChat frame builders.
 
-### `host_rs/` (Rust host for the ESP32 offload mode)
+## Status
 
-- It has the same JSON-lines GUI port as the Python host, and its packets are byte-for-byte equal to the Python
-  builders, which a unit test checks.
-- It assembles a message only once every byte has arrived.
-- On a Pi Zero 2 W with a DS in the room it uses 0.5 % CPU and 1 MB RAM. The Python host uses 1.7 % and 15 MB.
-- You need Rust: install it with [rustup](https://rustup.rs).
-- Build: `cd host_rs && cargo build --release`. The binary is `target/release/pictochat-host`.
-- For 32-bit Raspberry Pi OS without an ARM cross-compiler, run `rustup target add armv7-unknown-linux-musleabihf`
-  once, then `cargo build --release --target armv7-unknown-linux-musleabihf`. This links statically against musl
-  using rust-lld. Copy `target/armv7-unknown-linux-musleabihf/release/pictochat-host` to the Pi.
-- Options: `pictochat-host --help`.
+Working, tested with one DS Lite:
+- the room, text, handwriting, drawings and colour pictures;
+- several agents, the commands, the trust check;
+- agents that work on the computer, and the status screen on the Waveshare board.
 
-### `emu/`: two-DS emulator test bed
+Experimental:
+- **Agents as room members** (`"members": true`): it works on a DS Lite, but only since a fix for a state that left
+  the DS unable to send. Untested with several DSes.
+- **The CYD screen** (`cyd_display/`, `display/room_display.py --serial`, for the ESP32-2432S028): builds, but
+  untested on the board.
+- **The classic ESP32 radio** (USB-to-UART at 921600 baud): builds, but untested on air.
 
-This is the safe place to try protocol changes. It runs two emulated DS Lites on the real firmware, either talking to
-each other or to our host through a TCP bridge.
+## Layout
 
-- **Build tools:** git, cmake, g++ and unzip. On Debian, Ubuntu or Mint: `sudo apt install git cmake g++ unzip`.
-- **BIOS and firmware:** you need your own dumps of `bios7.bin`, `bios9.bin` and `firmware.bin` from a DS Lite. They
-  are Nintendo's copyrighted code and are not included. Either copy the three files into `emu/fw/`, or pass a zip that
-  contains them to `build.sh`.
-- `cd emu && ./build.sh ["path/to/zip"]` clones melonDS at commit `497aa6cd`, then builds its core, the harness and
-  `romrun`. It takes a few minutes.
-- `./start.sh OUT.pcap 2` runs two DSes that chat with each other, which gives reference traffic.
-  `./start.sh OUT.pcap 1 7778` runs one DS whose host side is a bridge for
-  `pictochat.py host --bridge 7778 --lockstep`.
-- **First run:**
-  1. Run `./start.sh first.pcap 2`.
-  2. Tap the screens with `./ctl.sh "touch 0 5 5 6" "touch 1 5 5 6"`.
-  3. If the DSes show the setup wizard (a firmware without user settings), run `./wizard.sh`. It completes the wizard
-     on both DSes.
-  4. Check with `./shot.sh 0 menu`, which writes `menu.png`. The DS menu should show PictoChat.
-- **Controlling the emulator:**
-  - `./ctl.sh "cmd"` accepts `touch I X Y [frames]`, `drag`, `key I MASK frames`, `shot I file.ppm`, `reset I`,
-    `fps N`, `fast on|off` and `quit`.
-  - `./shot.sh I name` saves a PNG screenshot.
-  - `python3 viewer.py 2` opens a live window; click the lower screen to tap it.
-- **A full bridged session:** `FPS=60 ./exp.sh TAG --lockstep` starts one emulated DS and the host, joins room A and
-  reports the join and the emulation speed. `./run_bridge.sh TAG [host args]` does the same without the report.
-  The host's GUI port is 7790, so `../.venv/bin/python sendchat.py 7790 "text"` sends text, and
-  `../.venv/bin/python ../examples/echo_bot.py 7790` runs the example bot. Both need Pillow, so use the venv.
-  The live host log is `TAG.log`. To run a second checkout at the same time, give it its own ports:
-  `BRIDGE_PORT=7878 GUI_PORT=7890 ./exp.sh TAG --lockstep`.
-- **Draw and send on the emulated DS:** `./ctl.sh "drag 0 100 45 200 80 30"` draws a line, and
-  `./ctl.sh "touch 0 238 116 8"` presses SEND. A stroke must start below the nickname tab in the top-left corner of
-  the drawing area, or PictoChat ignores it. The host log then shows `DS message complete`; at emulator speed this
-  can take half a minute.
-- **Stop everything:** `./stop.sh`. It stops only the harness and host that these scripts started.
-- **Analysis:** `flow.py PCAP t0 t1 [--no-fcs]` prints a compressed packet flow, and `early.py PCAP N` lists the frames
-  after association.
-- **Pitfalls:**
-  - The emulator does not advance time while it waits for the bridge, so use `--lockstep`.
-  - A one-instance harness must not be sent commands for instance 1.
-- `romrun.cpp` is a headless runner for homebrew `.nds` files: scripted keys, touch input, screenshots and an emulated
-  SD folder.
+| Path | What it is |
+|---|---|
+| `pictoagents`, `tools/ctl.py` | the command line tool |
+| `run.py` | keeps the host and the agents running |
+| `agents/manager.py` | the agents, the router, the DS commands, the status file |
+| `agents/claude_agent.py` | one Claude Code session; pictures in, PictoChat pictures out |
+| `agents/gate.py` | the trust check, a Claude Code hook |
+| `display/` | the status screen and the room view (Pillow), and the code that sends them to a screen |
+| `esp32c3_modem/` | the radio firmware (ESP32-S3, ESP32-C3, classic ESP32), with optional screen support |
+| `cyd_display/` | firmware for a CYD used as a separate screen |
+| `pictochat.py`, `pictochat_gui.py` | the PictoChat host and its picture helpers and window (from upstream, extended) |
+| `PROTOCOL.md`, `API.md` | how PictoChat works on the air, and the host's JSON-lines API (from upstream, extended) |
+| `docs/pictochat-host.md` | upstream's README: radio options, Rust host, emulator test bed |
+| `tools/fake_room.py`, `tools/flash_modem.sh` | testing without a DS; flashing the radio |
 
-## Running on the real DS
+## Credits and license
 
-- After a host restart, a DS that is still in the room sends a few deauths, then rejoins within about 2 s.
-- If the host was away for longer, the DS opens the room itself and stays there alone. Leave the room on the DS and
-  enter it again to get back to the host.
-- Only one host can use a modem. A second one on the same serial port is refused. If the host runs as a service,
-  stop the service before starting another host by hand.
-- If the DS drops out, try `--poll-ms 10` or `--no-confirm`. A frozen DS needs a power cycle.
-- Logs: `host_log.log` and `host_log.pcap`. Wireshark opens the pcap, and `pictochat.py analyze` decodes it. Captures
-  contain the real MAC addresses of your devices, so think twice before publishing them.
+Built on [LNYmachines/pictochat-host](https://github.com/LNYmachines/pictochat-host), whose authors worked out the
+PictoChat protocol and wrote the host, the ESP32 modem and the emulator test bed. Their history is part of this
+repository.
 
-## License
+GPL-3.0, like the project it is built on (see `LICENSE`).
 
-GPLv3 (see `LICENSE`). `emu/harness.cpp` and `emu/romrun.cpp` link against melonDS, which is GPLv3 as well.
-PictoChat and Nintendo DS are trademarks of Nintendo. This project is not affiliated with or endorsed by Nintendo.
+PictoChat and Nintendo DS are trademarks of Nintendo. Claude and Claude Code are trademarks of Anthropic. This
+project is not affiliated with or endorsed by either.

@@ -15,6 +15,8 @@ esp32c3_modem/build/
 esp32c3_modem/sdkconfig
 esp32c3_modem/sdkconfig.old
 esp32c3_modem/dependencies.lock
+esp32c3_modem/build-*/
+esp32c3_modem/sdkconfig.esp32*
 
 # emulator: melonDS checkout, build and runtime state; BIOS/firmware dumps are Nintendo's and stay local
 emu/melonDS/
@@ -34,3 +36,22 @@ emu/live*.ppm*
 emu/*.pid
 emu/sd*.img*
 emu/sdtest/
+
+# local
+.venv/
+refs/
+
+# agents: Claude Code working dirs, session ids
+agents/workdir/
+agents/state/
+host_run.log
+agent_*.log
+cyd_display/build/
+cyd_display/sdkconfig
+cyd_display/sdkconfig.old
+cyd_display/dependencies.lock
+cyd_display/managed_components/
+display_run.log
+logs/
+pictoagents.json
+cyd_display/.cache/

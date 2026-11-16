@@ -1,4 +1,3 @@
-# The host needs only the Python 3 standard library (and root for a monitor-mode adapter).
-pillow       # optional: text rendering and image import in pictochat_gui.py
-pyserial     # optional: ESP32-C3 modem (--serial)
-# tkinter for pictochat_gui.py: system package python3-tk
+pillow       # pictures: rendering text and drawings, the status screens
+pyserial     # the ESP32 radio over USB
+# tkinter is only needed for pictochat_gui.py's window (on macOS with Homebrew: brew install python-tk)
