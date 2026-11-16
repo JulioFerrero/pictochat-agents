@@ -35,6 +35,8 @@ sys.path.insert(0, str(ROOT))
 # the PictoChat picture format: palette, visible columns, clip() to what the DS shows, decode_image() of a message
 from pictochat_gui import PALETTE, VIS_X0, VIS_X1, clip, decode_image   # noqa: E402
 from PIL import Image, ImageDraw, ImageFont                              # noqa: E402
+from agents.icons import (EMOJI, ICON_SIZE, ICONS, draw_icon, emoji_to_placeholders,  # noqa: E402
+                          icon_for_placeholder)
 
 SYSTEM = """You are {name}, an AI who lives inside a Nintendo DS PictoChat room (Chat Room A). The room is hosted by \
 a Mac through an ESP32 radio; people join from their DS.
@@ -48,9 +50,13 @@ coordinates: x 0-229 from the left, y 0-79 from the top, as the rulers show. The
 y 0-15.
 
 Your text replies are drawn into PictoChat messages, so:
-- plain text only: no markdown, no emoji, no URLs unless asked
+- plain text only: no markdown, no URLs unless asked
 - short: usually 1 to 3 short lines, never more than 8
 - answer in the language the person used
+- these emoji appear as small coloured icons, the others are dropped: ✅ ❌ ⚠️ ⏳ ⭐ \
+❤️ ☀️ ☁️ 🌧️ 🐞 🚀 📁 ⚙️ 💡 \
+🔥 🙂 ✏️ 🎮 and the dots 🟢 🟡 🟠 🔴 🔵. \
+Use them where they help (task lists, status, weather), not in every line.
 
 You can also draw. Put one or more blocks like this in your reply, each becomes its own message, in order:
 ```draw
@@ -62,6 +68,11 @@ corrections, adding to a drawing); "blank" starts an empty picture.
 - X and O take a centre and a half-size; line and rect take two corners; fill is a filled rect; text takes the \
 top-left corner. ["width", 1-4] sets the pen, ["color", name] the ink: black, grey, red, orange, yellow, green, \
 cyan, blue, violet, pink, magenta, white (erases).
+- ["icon", name, x, y] draws an 11x11 icon (top-left corner): check, cross, warning, hourglass, star, heart, sun, \
+cloud, rain, bug, rocket, folder, gear, bulb, fire, smile, pencil, gamepad, and the dots green, yellow, orange, red, \
+blue. ["bar", x, y, width, percent, color] draws a progress bar 7 px high. Text in drawings can use the emoji too.
+- For status, task lists and simple charts, a blank drawing with coloured text, icons and bars reads best: one \
+item per 16-px line, starting at y 18 below the name tab (the first line has room from x 60).
 - In games like tic-tac-toe, put your mark in the middle of the right cell of THEIR board and send it back with \
 "on": "last", then add a short line of text if useful. Check the cell is empty first.
 
@@ -115,7 +126,10 @@ def text_font():
 
 
 def char_advance(char):
-    """How far the pen moves after one character: whole pixels, at least 1 (letters are drawn one by one)."""
+    """How far the pen moves after one character: whole pixels, at least 1 (letters are drawn one by one). An icon
+    (see agents/icons.py) is 11 px wide, plus 1 px of space."""
+    if icon_for_placeholder(char):
+        return ICON_SIZE + 1
     return max(1, round(text_font().getlength(char)))
 
 
@@ -127,16 +141,22 @@ def draw_text(draw, x, baseline, text, ink):
     """Draw text letter by letter, each on a whole pixel, so it is exactly as wide as text_width says."""
     font = text_font()
     for char in text:
-        draw.text((x, baseline), char, fill=ink, font=font, anchor="ls")
+        icon = icon_for_placeholder(char)
+        if icon:                                   # an emoji: its icon sits on the baseline, in its own colours
+            draw_icon(draw, x, baseline - ICON_SIZE, icon)
+        else:
+            draw.text((x, baseline), char, fill=ink, font=font, anchor="ls")
         x += char_advance(char)
 
 
 def plain(text):
-    """What the DS font can show: no markdown, no emoji, Latin script only."""
+    """What the DS font can show: no markdown, Latin script only, and the emoji that agents/icons.py has icons for
+    (as placeholder characters that draw_text draws as icons); other emoji are dropped."""
     text = unicodedata.normalize("NFC", text)
     text = re.sub(r"\*\*|__|`|^#+\s*", "", text, flags=re.M)
-    text = "".join(PLAIN_REPLACEMENTS.get(char, char) for char in text)
-    text = "".join(char for char in text if char in "\n€°" or (32 <= ord(char) < 0x250))
+    text = emoji_to_placeholders("".join(PLAIN_REPLACEMENTS.get(char, char) for char in text))
+    text = "".join(char for char in text
+                   if char in "\n€°" or (32 <= ord(char) < 0x250) or icon_for_placeholder(char))
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -305,6 +325,18 @@ def draw_picture(spec, last_rows):
                     draw.rectangle(box, outline=ink, width=pen_width)
                 else:
                     draw.rectangle(box, fill=ink)
+            elif kind == "icon":                   # ["icon", name or emoji, x, y]: top-left corner
+                name = EMOJI.get(str(values[0]).replace("\ufe0f", ""), str(values[0]).lower())
+                if name in ICONS:
+                    draw_icon(draw, picture_x(values[1]), picture_y(values[2]), name)
+            elif kind == "bar":                    # ["bar", x, y, width, percent, colour]: a progress bar
+                left, top, width = picture_x(values[0]), picture_y(values[1]), int(values[2])
+                percent = max(0.0, min(100.0, float(values[3])))
+                colour = INK_COLOURS.get(str(values[4]).lower(), 10) if len(values) > 4 else 10
+                filled = round((width - 2) * percent / 100)
+                if filled:
+                    draw.rectangle((left + 1, top + 1, left + filled, top + 5), fill=colour)
+                draw.rectangle((left, top, left + width - 1, top + 6), outline=1)
             elif kind == "text":
                 draw_text(draw, picture_x(values[0]), picture_y(values[1]) + BASELINE - 3, plain(str(values[2])), ink)
         except (IndexError, TypeError, ValueError):
