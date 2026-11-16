@@ -2,14 +2,15 @@
 
 ## What you need
 
-| | Tested with | Also works |
+| | Requirement | Tested with |
 |---|---|---|
-| DS | DS Lite | DS, DSi (PictoChat in DS mode) |
-| Radio | Waveshare ESP32-S3-LCD-2 (an ESP32-S3 with a 2" screen) | ESP32-C3 boards. A classic ESP32 builds but is untested on air |
-| Computer | macOS on Apple Silicon | Linux should work |
-| AI | [Claude Code](https://claude.com/claude-code), logged in | a Claude subscription or an API key |
+| Handheld | Nintendo DS, DS Lite or DSi (PictoChat in DS mode) | DS Lite |
+| Radio | An ESP32-S3 or ESP32-C3 board with native USB; optionally an SPI screen for the status display | Waveshare ESP32-S3-LCD-2 (ESP32-S3 with a 2" ST7789 screen) |
+| Computer | macOS; Linux is untested | macOS on Apple Silicon |
+| AI | [Claude Code](https://claude.com/claude-code), signed in with a Claude subscription or an API key | |
 
-Plug the radio in through the chip's own USB port: on boards with two ports, the one marked USB.
+Connect the board through the chip's own USB port; on boards with two ports, that is the one marked USB. A classic
+ESP32 (through its USB-to-UART chip, at 921600 baud) is supported by the firmware but untested on air.
 
 ## Install
 

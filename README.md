@@ -1,26 +1,25 @@
 # PictoChat Agents
 
-![DS: Lite · DSi](https://img.shields.io/badge/DS-Lite%20%C2%B7%20DSi-8B5CF6?style=flat-square)
-![radio: ESP32-S3 · C3](https://img.shields.io/badge/radio-ESP32--S3%20%C2%B7%20C3-1F2937?style=flat-square)
-![host: macOS](https://img.shields.io/badge/host-macOS-0EA5E9?style=flat-square)
-![AI: Claude Code](https://img.shields.io/badge/AI-Claude%20Code-D97757?style=flat-square)
-[![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-22C55E?style=flat-square)](LICENSE)
+[![Nintendo DS](https://img.shields.io/badge/Nintendo%20DS-PictoChat-E60012)](#getting-started)
+[![ESP32](https://img.shields.io/badge/ESP32-S3%20%7C%20C3-E7352C?logo=espressif&logoColor=white)](docs/setup.md#what-you-need)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-agents-D97757?logo=claude&logoColor=white)](https://claude.com/claude-code)
+[![macOS](https://img.shields.io/badge/macOS-host-000000?logo=apple&logoColor=white)](docs/setup.md)
+[![License](https://img.shields.io/github/license/JulioFerrero/pictochat-agents)](LICENSE)
 
-**Talk to Claude from a Nintendo DS.** AI agents join your PictoChat room as people: they read your handwriting,
-answer in PictoChat's own font, draw on your pictures and, if your DS is trusted, work on your computer.
+**AI agents for Nintendo DS PictoChat.** An ESP32 hosts a PictoChat room and connects it to
+[Claude Code](https://claude.com/claude-code). Agents join the room as members: they read handwriting and drawings,
+reply in PictoChat's own format and, for trusted devices, carry out tasks on the computer.
 
 | | |
 |---|---|
-| ![A DS Lite in PictoChat: the agent Coder reports that it fixed a bug and opened pull request #79](docs/images/ds-lite-coder.jpg) | ![The radio board's screen: room A, the agents Claude and Coder, and the DS in the room](docs/images/s3-status-screen.jpg) |
+| ![PictoChat on a DS Lite: an agent reports a completed task](docs/images/ds-lite-coder.jpg) | ![The status display: the room, its agents and what each one is doing](docs/images/s3-status-screen.jpg) |
 
-<sub>Left: Coder, an agent in the room, after it fixed a bug and opened a pull request, all asked from the DS. Right:
-the radio board's screen, with the room, the agents and what each one is doing.</sub>
+<sub>An agent reporting a completed task in PictoChat, and the optional status display.</sub>
 
 ## Getting started
 
-1. Get an ESP32-S3 or ESP32-C3 board and [Claude Code](https://claude.com/claude-code), logged in. The
-   [Waveshare ESP32-S3-LCD-2](https://docs.waveshare.com/ESP32-S3-LCD-2) is the tested board, and its screen shows
-   the agents.
+1. You need a Nintendo DS or DSi, an ESP32-S3 or ESP32-C3 board with native USB, a Mac and
+   [Claude Code](https://claude.com/claude-code). [Setup](docs/setup.md#what-you-need) lists the tested hardware.
 2. Install:
 
    ```sh
@@ -28,36 +27,39 @@ the radio board's screen, with the room, the agents and what each one is doing.<
    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    ```
 
-3. Flash the radio with `tools/flash_modem.sh`. It needs
+3. Flash the ESP32 with `tools/flash_modem.sh`. It requires
    [ESP-IDF 5.4](https://docs.espressif.com/projects/esp-idf/en/v5.4.1/esp32s3/get-started/index.html).
-4. Run `./pictoagents start`.
-5. On the DS, open PictoChat and enter **Chat Room A**. Claude is there.
+4. Start with `./pictoagents start`.
+5. On the DS, open PictoChat and join **Chat Room A**.
 
-**Agents that use your computer** need your DS to be trusted. `./pictoagents status` shows your DS's address; put it in
-`pictoagents.json` as `{"trust": ["00:09:bf:12:34:56"]}`. [Setup](docs/setup.md) has every setting.
+Agents use the computer only for trusted devices. `./pictoagents status` shows your DS's address; add it to
+`pictoagents.json` as `{"trust": ["00:09:bf:12:34:56"]}`.
 
-## On the DS
+## Commands
 
-| Write | |
+Typed or handwritten in PictoChat:
+
+| Command | |
 |---|---|
-| anything | the agent you last talked to answers (at first, Claude) |
-| `@Coder message` | talk to one agent |
-| `/new Chef cooks and gives recipes` | a new agent joins the room |
-| `/new Coder pc writes code` | one that works on your computer, in `~/PictoAgents/Coder` (trusted DSes only) |
-| `/agents`, `/stop Chef`, `/trust Ana`, `/help` | who is here, send one away, trust a friend's DS, the commands |
+| `@Name message` | Address an agent. Messages without a name go to the agent you last addressed. |
+| `/new Name description` | Add an agent to the room. |
+| `/new Name pc description` | Add an agent that works on the computer (trusted devices only). |
+| `/agents` | List the agents and what each one is doing. |
+| `/stop Name` | Remove an agent. |
+| `/trust Nickname` | Trust another DS in the room (trusted devices only). |
 
-Agents draw too, on a blank picture or on top of yours (their move on the tic-tac-toe board you drew).
+Agents can also draw, on a blank message or on top of the one they received.
 
-## More
+## Documentation
 
 - [Setup](docs/setup.md): hardware, settings, the `pictoagents` command, commit signatures, testing without a DS
-- [How it works](docs/how-it-works.md): the radio, the host and the agents, the layout, what's untested
-- [Security](docs/security.md): who can do what from the room, and the limits
+- [How it works](docs/how-it-works.md): the radio, the host and the agents, the layout, what is untested
+- [Security](docs/security.md): what each device can do, and the limits
 
 ## Licence
 
-GPL-3.0, like [LNYmachines/pictochat-host](https://github.com/LNYmachines/pictochat-host): this project is built on
-its host, its ESP32 radio and its PictoChat protocol research.
+GPL-3.0. Built on [LNYmachines/pictochat-host](https://github.com/LNYmachines/pictochat-host), which provides the
+PictoChat host, the ESP32 radio firmware and the protocol research.
 
 PictoChat and Nintendo DS are trademarks of Nintendo, and Claude is a trademark of Anthropic. This project isn't
 affiliated with either.
